@@ -1,0 +1,108 @@
+# gitleaks configuration.
+#
+# WHY THIS FILE EXISTS, beyond turning the scanner on:
+#
+# This platform receives credentials the Authority mints in a format stock
+# gitleaks cannot know — `a2a_{secrets.token_urlsafe(32)}` — and stores NPCI JWT
+# and HMAC secrets, a partner API key, an Anthropic key and a GitLab token in
+# `partner_settings`, encrypted at rest. A leak of any of those would pass a
+# default scan silently, which is the false-assurance case this config closes.
+#
+# Kept deliberately close to the Authority platform's config so a rule added on
+# one side is easy to mirror on the other. When you add a new credential format,
+# add a rule here in the same commit.
+
+title = "atom-partner-platform secret scan"
+
+[extend]
+useDefault = true
+
+# ── Credential formats the ecosystem mints ───────────────────────────────────
+
+[[rules]]
+id = "a2a-partner-api-key"
+description = "A2A partner API key issued by the Authority (a2a_ + token_urlsafe(32))"
+# token_urlsafe(32) is 43 chars of [A-Za-z0-9_-]. Require 40+ so the literal
+# prefix in prose ("keys look like a2a_…") does not trip the gate.
+regex = '''a2a_[A-Za-z0-9_\-]{40,}'''
+keywords = ["a2a_"]
+
+[[rules]]
+id = "anthropic-key-with-body"
+description = "Anthropic API key with a realistic body"
+# Not the bare prefix: the Settings UI and docs legitimately show
+# `sk-ant-api03-...` as a placeholder. The body length is what distinguishes a
+# real key from a documented example.
+regex = '''sk-ant-api03-[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-ant-api03-"]
+
+[[rules]]
+id = "gitlab-pat-with-body"
+description = "GitLab PAT with a realistic body (not a placeholder)"
+# Deliberately NOT the bare `glpat-` prefix: the tree legitimately contains
+# documented placeholders. A real token has a 20+ char body.
+regex = '''glpat-[A-Za-z0-9_\-]{20,}'''
+keywords = ["glpat-"]
+
+# ── Allowlist ────────────────────────────────────────────────────────────────
+
+[allowlist]
+description = "Known-safe matches, each justified. Do not add entries without a reason."
+
+# ONE historical commit, scoped by SHA rather than by rule, path or regex.
+#
+# 5784350 fixed the backend CI job and, in doing so, wrote a literal base64
+# value for PARTNER_SECRET_KEK into .github/workflows/ci.yml. It was never a
+# secret — it decodes to "ci-only-kek-not-a-real-secret-value" — but a scanner
+# cannot tell that from entropy alone, and gitleaks flagged it as
+# generic-api-key at 4.73. The working tree no longer contains it: the job now
+# generates the key with `openssl rand`, so there is nothing to find going
+# forward. Only the full-history scan still sees it, in that one commit.
+#
+# Scoped to the SHA deliberately. A regex on the literal would silence the same
+# string if someone reintroduced it tomorrow; a commit allowlist cannot — a new
+# commit carrying that value still fails. The entry becomes dead weight the
+# moment this repository is republished without its history, and should be
+# deleted then.
+commits = [
+  "578435074718bfac8ee735792c14b266cff68825",
+]
+
+paths = [
+  # Local environment files. These hold REAL secrets — which is exactly why they
+  # are gitignored and can never be committed. `gitleaks --no-git` scans the
+  # FILESYSTEM, so without this a developer with a working .env gets a red gate
+  # on a file git will never see, and a gate that is red by default is a gate
+  # people learn to ignore. A .env that is actually TRACKED is a different
+  # problem and is not allowlisted anywhere.
+  '''(^|/)\.env$''',
+  '''(^|/)\.env\..*''',
+
+  # Python bytecode. Compiled modules embed their own string constants, so a
+  # source match allowlisted below reappears here as an opaque binary hit that
+  # no regex can sensibly target. CI checks out clean and never has these; this
+  # is purely so a local run after `pytest` is not red for no reason.
+  '''__pycache__/.*''',
+  '''\.pyc$''',
+]
+
+regexes = [
+  # Python identifiers beginning `a2a_`, which are 40+ characters of [a-z_] and
+  # so match the a2a-partner-api-key length rule. Safe because a minted key is
+  # 43 characters from a 64-symbol alphabet: the chance of one being ALL
+  # lowercase and underscores is about 1e-16. RE2 has no lookahead, so this
+  # cannot be written as "must contain an uppercase or digit" in the rule.
+  '''a2a_[a-z_]{40,}''',
+
+  # A localStorage key in the feasibility panel, not a credential
+  # (frontend/src/components/FeasibilityPanel.jsx).
+  '''pp_feasibility_sent_v1''',
+
+  # A comment fragment in npci_client.py describing which failure modes the
+  # auth path catches. The generic high-entropy rule mistakes it for a key.
+  '''empty/wrong/rotated''',
+
+  # Documented placeholders in setup guides and the Settings UI.
+  '''glpat-(your-token|\.\.\.)''',
+  '''sk-ant-api03-\.\.\.''',
+]

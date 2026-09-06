@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Prototype preview</title>
+<!--
+  ══════════════════════════════════════════════════════════════════════════
+  SANDBOX HOST FOR UNTRUSTED PROTOTYPE MARKUP.
+
+  This page exists to hold the AI-generated click-through prototypes shown in
+  ChangeDetail.jsx. It is deliberately a REAL URL rather than an iframe
+  `srcDoc` string, and that distinction is the whole point of the file.
+
+  ── THE PROBLEM ───────────────────────────────────────────────────────────
+  The app's CSP sets `script-src 'self'` with no 'unsafe-inline' (see
+  frontend/scripts/generate-csp.mjs). A document loaded via `srcDoc` or a
+  `blob:` URL INHERITS the embedding page's policy — it has no origin of its
+  own to carry one. Verified in Chrome: under the app's strict policy the
+  inline scripts inside a srcDoc prototype did not run, and the same held for
+  a blob: URL. The previews would have rendered as dead, silent mockups.
+
+  The prototypes need inline script: the generator emits onclick="go('...')"
+  handlers and setTimeout blocks to drive the screen-to-screen walkthrough.
+  Stripping the script would delete the feature, not secure it. So the goal
+  is not "no script" but "script that can do nothing harmful".
+
+  ── THE ARRANGEMENT ───────────────────────────────────────────────────────
+  A document fetched from a real URL gets the policy of ITS OWN response, not
+  the parent's. nginx serves this one path with a deliberately different,
+  egress-free CSP (see the `location = /preview-shell.html` block in
+  deploy/edge.nginx.conf), so the prototype's inline scripts run while the
+  application around it keeps a strict script-src.
+
+  Three independent controls apply to whatever is rendered here:
+
+    1. sandbox="allow-scripts" WITHOUT allow-same-origin, set by the embedder
+       on the iframe pointing at this page. The document lands in an opaque
+       origin: no parent DOM, no cookies, no localStorage, no session token.
+    2. This page's own CSP response header: default-src 'none' with
+       connect-src 'none' and form-action 'none' — no fetch, XHR, WebSocket,
+       beacon, or form POST. A prompt-injected payload cannot phone home.
+    3. No same-origin data is ever placed in this document. It receives only
+       the prototype markup, over postMessage, from its embedder.
+
+  Verified in Chrome under the real app policy: the prototype's inline script
+  RAN, reading the parent DOM was BLOCKED, and network egress was BLOCKED.
+
+  ── WHY document.write ────────────────────────────────────────────────────
+  Replacing this document wholesale is the only way to render a complete HTML
+  document (doctype, <head>, <body>) that arrives as a string. innerHTML
+  cannot: it parses a fragment, drops <head>, and — decisively — does NOT
+  execute <script> elements, so the walkthrough would be inert.
+
+  frontend/test/noRawHtml.test.mjs bans document.write across src/. That ban
+  is right for the application: there, the sinks run in the app's own origin
+  with the user's session. Here the surrounding controls invert the risk, and
+  this file lives in public/ rather than src/ — it is a static asset, not part
+  of the bundle. The test asserts this file's controls are intact, so the
+  exception is enforced rather than merely argued.
+  ══════════════════════════════════════════════════════════════════════════
+-->
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #fff; }
+</style>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+
+  // Render exactly once. Without this latch a second `render` message would
+  // reopen the document and re-run the payload; a prototype that has already
+  // been given script execution could use that to reset its own state after
+  // any in-page guard ran. One document, one render.
+  var rendered = false;
+
+  window.addEventListener('message', function (event) {
+    // Only the embedding window may drive this page. A frame in an opaque
+    // origin cannot be addressed directly by a third party, but postMessage
+    // is broadcast-shaped by nature, so the source check is cheap insurance.
+    if (event.source !== window.parent) return;
+
+    var data = event.data;
+    if (!data || data.type !== 'render' || typeof data.html !== 'string') return;
+    if (rendered) return;
+    rendered = true;
+
+    // Replace this document with the prototype. See "WHY document.write".
+    document.open();
+    document.write(data.html);
+    document.close();
+  });
+
+  // Announce readiness. The embedder waits for this before posting markup —
+  // iframe.onload can fire before this listener is attached, and the race is
+  // real: the message would arrive with nothing listening and the preview
+  // would stay blank.
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'preview-shell-ready' }, '*');
+  }
+})();
+</script>
+</body>
+</html>

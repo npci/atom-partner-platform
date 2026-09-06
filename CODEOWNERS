@@ -1,0 +1,68 @@
+# CODEOWNERS — Partner Platform
+#
+# Defines code ownership for critical paths in the repository.
+# GitHub automatically requests reviews from the listed owners
+# when a pull request touches matching files.
+#
+# Syntax:  <pattern>  <@owner-or-team> [<@owner-or-team> ...]
+#
+# Reference:
+#   GitHub  — https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# The maintainer team is shared with AtOM: the same people own both
+# sides of the A2A wire, and a signing change has to land on both together.
+
+# ── Default owner (catches everything not matched below) ──────────────────────
+*                               @npci/unifiedagentnxt-maintainers
+
+# ── Governance & legal ────────────────────────────────────────────────────────
+LICENSE                         @npci/unifiedagentnxt-maintainers
+NOTICE                          @npci/unifiedagentnxt-maintainers
+SECURITY.md                     @npci/unifiedagentnxt-maintainers
+CODE_OF_CONDUCT.md              @npci/unifiedagentnxt-maintainers
+CONTRIBUTING.md                 @npci/unifiedagentnxt-maintainers
+GOVERNANCE.md                   @npci/unifiedagentnxt-maintainers
+TRADEMARKS.md                   @npci/unifiedagentnxt-maintainers
+THIRD-PARTY-NOTICES.md          @npci/unifiedagentnxt-maintainers
+CODEOWNERS                      @npci/unifiedagentnxt-maintainers
+
+# ── Documentation ─────────────────────────────────────────────────────────────
+docs/                           @npci/unifiedagentnxt-maintainers
+README.md                       @npci/unifiedagentnxt-maintainers
+ARCHITECTURE.md                 @npci/unifiedagentnxt-maintainers
+DEPLOYMENT_GUIDE.md             @npci/unifiedagentnxt-maintainers
+
+# ── Tier 1: the A2A contract ──────────────────────────────────────────────────
+# Mirrored from the Authority platform. Never edit one side alone — see
+# CONTRIBUTING.md, "Architecture rules worth knowing early".
+backend/app/a2a_common/         @npci/unifiedagentnxt-maintainers
+backend/app/npci_client.py      @npci/unifiedagentnxt-maintainers
+
+# ── Tier 2: platform (transport, persistence, auth) ───────────────────────────
+backend/app/api/                @npci/unifiedagentnxt-maintainers
+backend/app/core/               @npci/unifiedagentnxt-maintainers
+backend/app/models.py           @npci/unifiedagentnxt-maintainers
+backend/app/database.py         @npci/unifiedagentnxt-maintainers
+backend/app/config.py           @npci/unifiedagentnxt-maintainers
+backend/app/main.py             @npci/unifiedagentnxt-maintainers
+backend/app/services/           @npci/unifiedagentnxt-maintainers
+
+# ── Tier 3: agent framework ───────────────────────────────────────────────────
+# The framework itself is owned; individual agent bodies are the fork's to
+# replace, which is the whole point of this repository.
+backend/app/agents/base.py      @npci/unifiedagentnxt-maintainers
+backend/app/agents/loader.py    @npci/unifiedagentnxt-maintainers
+backend/app/agents/registry.py  @npci/unifiedagentnxt-maintainers
+backend/app/agents/audit.py     @npci/unifiedagentnxt-maintainers
+backend/app/agents/remote.py    @npci/unifiedagentnxt-maintainers
+backend/app/rag/                @npci/unifiedagentnxt-maintainers
+
+# ── Frontend ──────────────────────────────────────────────────────────────────
+frontend/src/                   @npci/unifiedagentnxt-maintainers
+
+# ── Dependency and build surface ──────────────────────────────────────────────
+backend/requirements.txt        @npci/unifiedagentnxt-maintainers
+backend/requirements.lock       @npci/unifiedagentnxt-maintainers
+frontend/package.json           @npci/unifiedagentnxt-maintainers
+frontend/package-lock.json      @npci/unifiedagentnxt-maintainers
+docker-compose.yml              @npci/unifiedagentnxt-maintainers

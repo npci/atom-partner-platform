@@ -1,0 +1,9 @@
+{
+  "term.authority": "NPCI",
+  "term.authorityCap": "NPCI",
+  "term.authorityOrg": "NPCI UPI Change Management",
+  "ph.repo.name": "e.g. UPI Core Platform",
+  "ph.kb.title": "Title (e.g. UPI 2.0 Technical Spec)",
+  "cert.reportTitle": "UPI Certification Report",
+  "cert.filePrefix": "NPCI_Certification"
+}

@@ -1,0 +1,38 @@
+{
+  "name": "partner-platform",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:safeurl": "node test/safeUrl.test.mjs",
+    "test:noRawHtml": "node test/noRawHtml.test.mjs",
+    "test:artifactRef": "node test/artifactRef.test.mjs",
+    "test:mrUrl": "node test/mrUrl.test.mjs",
+    "test:mergeRequestLink": "node test/mergeRequestLink.test.mjs",
+    "test:boundedLoops": "node test/boundedLoops.test.mjs",
+    "test:frameBuster": "node test/frameBuster.test.mjs",
+    "test:cspPolicy": "node test/cspPolicy.test.mjs",
+    "csp": "node scripts/generate-csp.mjs",
+    "test": "npm run test:safeurl && npm run test:noRawHtml && npm run test:artifactRef && npm run test:mrUrl && npm run test:mergeRequestLink && npm run test:boundedLoops && npm run test:frameBuster && npm run test:cspPolicy"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.99.0",
+    "axios": "^1.18.1",
+    "lucide-react": "^1.8.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.18.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.4"
+  },
+  "overrides": {
+    "form-data": "^4.0.6",
+    "nanoid": "^5.1.6"
+  }
+}

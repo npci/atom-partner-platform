@@ -1,0 +1,148 @@
+# Build and test gate.
+#
+# The secret gate lives in secret-scan.yml. This workflow covers the build and
+# the test suites.
+#
+# Everything here is BLOCKING, because everything here passes: the backend suite
+# is 1,604 passed / 9 skipped / 0 failed and the frontend guards and build are
+# green, measured 2026-09-03 by running this job's exact docker command
+# locally. There is no advisory step and no known-failure baseline to carry,
+# which is the state the Authority platform's ci.yml is working towards.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      # BLOCKING. `vite build` is the only type/build check this app has.
+      #
+      # It runs BEFORE the guards on purpose. Two of the CSP checks read
+      # dist/index.html and dist/preview-shell.html to verify the nginx CSP hash
+      # matches the inline frame buster and that production HTML is
+      # comment-free. Without a build they SKIP rather than fail, and the
+      # guard's own output says so: "CI must build before testing or this check
+      # is vacuous." Guards-then-build passes just as green while silently
+      # testing two fewer things.
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      # BLOCKING. `npm test` runs eight security guards rather than unit tests:
+      # safe URL handling, no raw HTML injection, artifact-reference and
+      # merge-request-URL validation, bounded loops, the frame-buster, and the
+      # CSP policy. They are cheap and they defend UI-side controls that no
+      # backend test can see. With the build above in place all 37 checks run;
+      # without it, 35 run and 2 skip.
+      - name: Frontend security guards
+        run: npm test
+        working-directory: frontend
+
+  backend-tests:
+    name: backend tests
+    runs-on: ubuntu-latest
+    # BLOCKING from the first run, which is unusual and is the point: the suite
+    # is green today, so there is no baseline of accepted failures to erode.
+    #
+    # Two tests had to be corrected to get here, and the direction matters. They
+    # asserted that OutboundA2ARetry.last_error contained the exception MESSAGE,
+    # while npci_client deliberately records the exception TYPE via safe_exc()
+    # so that a transport failure cannot pin the resolved NPCI host, port and
+    # token prefix into a UI-visible retry row (CWE-209). The tests were
+    # asserting on the vulnerable behaviour and would have resisted the fix;
+    # they now assert the redaction holds.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: partner_user
+          POSTGRES_PASSWORD: ci_password
+          POSTGRES_DB: partner_db
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+        ports: ['5432:5432']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build rather than pip-install: the lock resolves once into a cached
+      # layer instead of on every run, and the suite then runs against exactly
+      # the dependency set the image ships.
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          load: true
+          tags: partner-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      # THE REPO IS MOUNTED; THE TESTS ARE NOT IN THE IMAGE. backend/.dockerignore
+      # excludes tests/ on purpose — its fixtures carry deliberately hardcoded
+      # secrets to exercise the crypto and fail-closed auth paths, and
+      # .checkmarx/cx.config.json excludes the same folder. That exclusion is only
+      # honest if the code really is absent from what deploys, so the image must
+      # not carry them and this job must not expect it to.
+      #
+      # Mounted at /repo rather than /app/tests because several tests assert on
+      # REPOSITORY documents, not application behaviour, and compute the repo root
+      # as Path(__file__).parents[2] — test_vex_document.py and
+      # test_npci_ssrf_guard.py both do. Mounting only backend/tests makes that
+      # resolve to "/" and they fail with 14 errors and 9 failures.
+      #
+      # PARTNER_ALLOW_HTTP is set because config.py hard-fails on cleartext
+      # service URLs in every environment, and the CI defaults are http://
+      # localhost services that never leave the runner. The guard itself is
+      # covered by its own tests; this only stops it aborting collection.
+      #
+      # DATABASE_URL must carry the +psycopg driver: the image ships psycopg 3,
+      # and a bare postgresql:// URL selects SQLAlchemy's psycopg2 dialect, which
+      # is not installed. compose and backend/.env.example both use this form.
+      #
+      # PARTNER_SECRET_KEK is GENERATED here rather than written inline. A literal
+      # base64 key is indistinguishable from a real one to a scanner — the first
+      # version of this step embedded one and gitleaks flagged it as
+      # generic-api-key (entropy 4.73), turning a green secret-scan red for a
+      # value that was never a secret. Generating it removes the finding at
+      # source instead of allowlisting it, which is the better trade: an
+      # allowlist entry teaches the next person that this scanner cries wolf.
+      # A fresh key per run is fine — nothing it encrypts outlives the container.
+      - name: Run pytest
+        run: |
+          docker run --rm --network host \
+            -v "$PWD:/repo:ro" -w /repo/backend \
+            -e SECRET_KEY=ci-secret-key-at-least-32-characters \
+            -e DATABASE_URL=postgresql+psycopg://partner_user:ci_password@localhost:5432/partner_db \
+            -e SESSION_JWT_SECRET=ci-session-jwt-secret-at-least-32-chars-long \
+            -e PARTNER_SECRET_KEK="$(openssl rand -base64 32)" \
+            -e PARTNER_ALLOW_HTTP=true \
+            partner-backend:ci python -m pytest tests -q --no-header -p no:cacheprovider
+
+  dependency-audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pip-audit==2.7.3
+      # ADVISORY. pip-audit reports transitive advisories a given PR has no way
+      # to fix, so blocking here would train people to ignore it.
+      - name: Audit backend requirements (advisory)
+        continue-on-error: true
+        run: pip-audit -r backend/requirements.txt --desc

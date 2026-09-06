@@ -1,0 +1,37 @@
+# Partner SPA container config.
+#
+# IMPORTANT — this serves at "/", not at "/${CONTEXT_PATH}/".
+# deploy/edge.nginx.conf proxies with a TRAILING SLASH:
+#
+#     location /a2a-partner/ { proxy_pass http://frontend:80/; }
+#
+# which makes nginx strip the prefix, so this container receives "/" and
+# "/changes/123" — never "/a2a-partner/...". A config that matched on
+# `location /${CONTEXT_PATH}/` therefore answered 302 on the index and 404 on
+# every deep link, because nothing here matched the stripped path.
+#
+# The browser still sees /${CONTEXT_PATH}/, and index.html references its
+# assets RELATIVELY, so <base href> must be injected — otherwise a refresh on
+# /a2a-partner/changes/123 resolves assets to /a2a-partner/changes/assets/…
+# and the page comes up blank.
+server {
+    listen 80;
+    server_tokens off;
+
+    # Clickjacking / sniffing defence-in-depth (edge nginx also sets these).
+    add_header X-Frame-Options "DENY" always;
+    add_header Content-Security-Policy "frame-ancestors 'none'" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        # SPA fallback: client-side routes are not files on disk.
+        try_files $uri $uri/ /index.html;
+
+        # Anchor relative asset URLs at the public prefix the browser is on.
+        sub_filter '<head>' '<head><base href="/${CONTEXT_PATH}/">';
+        sub_filter_once on;
+        sub_filter_types text/html;
+    }
+}

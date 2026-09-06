@@ -1,0 +1,257 @@
+Partner Platform — Change Management
+Copyright 2026 National Payments Corporation of India
+
+This product is licensed under the MIT License. See the LICENSE file for the
+full text.
+
+THIS FILE IS NOT REQUIRED BY THE MIT LICENSE, AND IS KEPT ANYWAY.
+
+Under Apache-2.0, section 4(d) obliged every redistributor to propagate this
+file. The MIT License has no equivalent mechanism, so nothing compels a
+downstream user to carry it. It is retained because section 2 below is how
+this project discharges the attribution its OWN DEPENDENCIES require: MIT and
+BSD licensed packages each require their copyright and permission notices to
+travel with the code, and this is where that is done. Deleting it would leave
+those obligations unmet.
+
+This repository contains the partner-side reference implementation of the A2A
+change-management protocol. The Authority-side platform, AtOM, is a
+separate work under the same licence and the same copyright holder. The
+`backend/app/a2a_common/` package is mirrored between the two repositories; the
+copies carry identical licensing.
+
+================================================================================
+                            THIRD-PARTY NOTICES
+================================================================================
+
+This file lists third-party software that the Partner Platform depends on,
+bundles, or redistributes, together with the licences that govern each item.
+
+Scope and method
+----------------
+Licence identifiers below were taken from package metadata (Python distribution
+metadata and npm registry `license` fields) and from licence files committed to
+this repository. Where a package publishes a dual or compound licence, the full
+expression is reproduced rather than simplified.
+
+The Partner Platform links to all of its dependencies as unmodified libraries
+resolved at install time; it does not vendor their source. Full licence texts
+ship inside each package's own distribution.
+
+The Python closure is hash-locked: `backend/requirements.lock` pins 71
+distributions by version and SHA-256 and is installed with `--require-hashes`,
+so the inventory below is exact for that file rather than an approximation of a
+resolve. The Node closure is pinned by `frontend/package-lock.json`
+(160 packages, production and build tooling combined).
+
+Note that `requirements.lock`, not `requirements.txt`, is what the image
+installs, and the two have drifted. Where they disagree, this file follows the
+lock, because the lock is what ships. The drift is itemised in
+THIRD-PARTY-NOTICES.md and tracked in SECURITY.md.
+
+--------------------------------------------------------------------------------
+1. COPYLEFT AND RECIPROCAL LICENCES — READ BEFORE DISTRIBUTING
+--------------------------------------------------------------------------------
+
+1.1 LGPL libraries — dynamically linked, unmodified
+
+    These are used as unmodified libraries installed from PyPI. The LGPL's
+    reciprocal duties attach to the libraries themselves, not to the Partner
+    Platform's own source, and are satisfied so long as you continue to supply
+    the library source (or a written offer for it) and permit users to
+    substitute a modified library version.
+
+    | Package          | Licence            | Source                                         |
+    |------------------|--------------------|------------------------------------------------|
+    | psycopg[binary]  | LGPL-3.0-or-later  | https://github.com/psycopg/psycopg              |
+    | python-gitlab    | LGPL-3.0-or-later  | https://github.com/python-gitlab/python-gitlab  |
+    | chardet          | LGPL-2.1-or-later  | https://github.com/chardet/chardet              |
+
+    `chardet` is transitive (via `python-gitlab` → `requests-toolbelt`), not a
+    direct pin. It is listed because a transitive LGPL package is still a
+    distributed LGPL package.
+
+    Caution for single-file or statically linked builds: bundling these into a
+    frozen binary can trigger the LGPL relinking obligation. Standard container
+    and virtualenv deployments, which keep the libraries as separate importable
+    modules, do not.
+
+1.2 Mozilla Public Licence components
+
+    | Package      | Licence expression              | Notes                                                     |
+    |--------------|---------------------------------|-----------------------------------------------------------|
+    | certifi      | MPL-2.0                         | CA bundle, unmodified. File-level copyleft only.          |
+    | tqdm         | MPL-2.0 AND MIT                 | Transitive. Unmodified use imposes no duty on this code.  |
+    | lightningcss | MPL-2.0                         | Build-time only (Vite/Tailwind CSS pipeline). Not shipped in the served bundle. |
+
+--------------------------------------------------------------------------------
+2. DEPENDENCIES REQUIRING ATTRIBUTION
+--------------------------------------------------------------------------------
+
+These dependencies carry attribution notices that must be preserved in
+redistributions. Apache-2.0 section 4(d) requires it of the Apache-licensed
+ones; the MIT and BSD licensed packages require their copyright and permission
+notices to travel in the same way. Their copyright and NOTICE content is
+retained inside each installed package.
+
+Python
+    a2a-sdk                     https://github.com/a2aproject/a2a-python
+    bcrypt                      https://github.com/pyca/bcrypt
+    google-api-core             https://github.com/googleapis/python-api-core
+    google-auth                 https://github.com/googleapis/google-auth-library-python
+    googleapis-common-protos    https://github.com/googleapis/python-api-common-protos
+    openai                      https://github.com/openai/openai-python
+    proto-plus                  https://github.com/googleapis/proto-plus-python
+    requests                    https://github.com/psf/requests
+    requests-toolbelt           https://github.com/requests/toolbelt
+
+JavaScript / Node
+    detect-libc                 https://github.com/lovell/detect-libc
+
+Compound expressions
+    cryptography                Apache-2.0 OR BSD-3-Clause
+
+--------------------------------------------------------------------------------
+3. PERMISSIVE DEPENDENCIES
+--------------------------------------------------------------------------------
+
+The following are used unmodified under permissive terms. Attribution is
+provided here; their full licence texts ship with each package.
+
+3.1 Python — web, API, and runtime
+
+    fastapi              MIT          |  uvicorn            BSD-3-Clause
+    starlette            BSD-3-Clause |  h11                MIT
+    pydantic             MIT          |  pydantic-settings  MIT
+    pydantic-core        MIT          |  anyio              MIT
+    httpx                BSD-3-Clause |  httpcore           BSD-3-Clause
+    httpx-sse            MIT          |  sse-starlette      BSD-3-Clause
+    httptools            MIT          |  uvloop             MIT OR Apache-2.0
+    watchfiles           MIT          |  websockets         BSD-3-Clause
+    python-dotenv        BSD-3-Clause |  click              BSD-3-Clause
+    sniffio              MIT OR Apache-2.0
+
+3.2 Python — auth and cryptography
+
+    bcrypt               Apache-2.0   |  ecdsa              MIT
+    rsa                  Apache-2.0   |  pyasn1             BSD-2-Clause
+    pyasn1-modules       BSD-2-Clause
+    cryptography         Apache-2.0 OR BSD-3-Clause
+
+    JWT handling: the lock ships `python-jose[cryptography]` 3.4.0 (MIT).
+    `requirements.txt` has already moved to `PyJWT` 2.13.0 (MIT) — both are MIT,
+    so the licence position is identical either way. See
+    THIRD-PARTY-NOTICES.md, "Known reconciliation points".
+
+3.3 Python — persistence
+
+    SQLAlchemy           MIT          |  greenlet           MIT
+    aiosqlite            MIT
+    psycopg[binary]      LGPL-3.0-or-later (see §1.1)
+
+3.4 Python — protocol and A2A
+
+    a2a-sdk              Apache-2.0   |  culsans            MIT
+    aiologic             MIT          |  json-rpc           MIT
+    protobuf             BSD-3-Clause |  wrapt              BSD-2-Clause
+
+3.5 Python — model-provider client SDKs
+
+    anthropic            MIT          |  openai             Apache-2.0
+    jiter                MIT          |  distro             Apache-2.0
+
+    These are API clients only — no provider-authored content is redistributed
+    with this project. Both are optional at runtime: with no LLM key configured
+    the feasibility agent returns mock output and the clients never build.
+
+3.6 Python — documents and reporting
+
+    python-docx          MIT          |  python-pptx        MIT
+    reportlab            BSD-3-Clause |  Pillow             MIT-CMU (HPND)
+    lxml                 BSD-3-Clause |  XlsxWriter         BSD-2-Clause
+    PyYAML               MIT          |  chardet            LGPL-2.1-or-later (see §1.1)
+
+3.7 Python — HTTP, encoding, and support
+
+    certifi              MPL-2.0 (see §1.2)  |  charset-normalizer  MIT
+    idna                 BSD-3-Clause |  urllib3            MIT
+    packaging            Apache-2.0 OR BSD-2-Clause
+    six                  MIT          |  typing-extensions  PSF-2.0
+    typing-inspection    MIT          |  annotated-types    MIT
+    cffi                 MIT          |  pycparser          BSD-3-Clause
+    pygments             BSD-2-Clause |  tqdm               MPL-2.0 AND MIT (see §1.2)
+
+3.8 Python — testing
+
+    pytest               MIT          |  pluggy             MIT
+    iniconfig            MIT          |  ruff               MIT (dev only)
+
+3.9 JavaScript — frontend runtime
+
+    react, react-dom     MIT          |  react-router-dom   MIT
+    react-markdown       MIT          |  @tanstack/react-query  MIT
+    axios                MIT          |  lucide-react       ISC
+
+3.10 JavaScript — build tooling (not shipped in the served bundle)
+
+    vite                 MIT          |  @vitejs/plugin-react  MIT
+    esbuild              MIT          |  rollup             MIT
+    source-map-js        BSD-3-Clause |  picocolors         ISC
+    lightningcss         MPL-2.0 (see §1.2)
+
+--------------------------------------------------------------------------------
+4. CONTAINER IMAGES
+--------------------------------------------------------------------------------
+
+Container images built from this repository install additional software from
+operating-system and language package repositories. That software is governed by
+its own licences and is not covered by the MIT grant over Partner
+Platform source. It matters because distributing a built image is distributing
+those components.
+
+4.1 Backend image (backend/Dockerfile)
+
+    | Component            | Licence          | Role                            |
+    |----------------------|------------------|---------------------------------|
+    | python:3.12-slim     | PSF-2.0 + Debian | Base image                      |
+
+4.2 Frontend image (frontend/Dockerfile)
+
+    | Component            | Licence          | Role                            |
+    |----------------------|------------------|---------------------------------|
+    | node:20-alpine       | MIT + Alpine     | Build stage                     |
+    | nginx:alpine         | BSD-2-Clause     | Static file server              |
+
+4.3 Images pulled at runtime (docker-compose.yml)
+
+    Referenced by tag and never rebuilt or redistributed here:
+    pgvector/pgvector:pg16 (PostgreSQL Licence, plus PostgreSQL Licence for the
+    pgvector extension) and ollama/ollama:latest (MIT).
+
+--------------------------------------------------------------------------------
+5. TRADEMARKS
+--------------------------------------------------------------------------------
+
+The MIT License grants copyright permissions only. It says nothing about
+patents and nothing about trademarks, so no trademark rights are conveyed
+with this software.
+Product and company names referenced here — including NPCI, UPI, OpenAI,
+Anthropic, Google, PostgreSQL, and Docker — are trademarks of their respective
+owners. Their use in this file is nominative, identifying the software
+concerned, and implies no affiliation or endorsement. See TRADEMARKS.md.
+
+--------------------------------------------------------------------------------
+6. REPORTING ATTRIBUTION ISSUES
+--------------------------------------------------------------------------------
+
+If you find a missing, incorrect, or outdated attribution, please open an issue
+or a merge request. See SECURITY.md for reporting anything with a security
+dimension, and CONTRIBUTING.md for the DCO sign-off requirement.
+
+Regenerating the inventory: licence facts in this file were read from the
+committed lockfiles. To reproduce for a specific deployment:
+
+    pip install pip-licenses && pip-licenses --format=markdown --with-urls
+    cd frontend && npx license-checker --production --summary
+
+Last reviewed: 2026-08-24

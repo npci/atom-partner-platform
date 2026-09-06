@@ -1,0 +1,153 @@
+# fastapi bumped 0.115.5 -> 0.141.1 to reach starlette 1.x. 0.115.5 declares
+# `starlette<0.42.0,>=0.40.0`, which pinned starlette to 0.41.3 — the single
+# component carrying every REACHABLE finding in the SCA report (7 advisories,
+# incl. CVE-2026-54283, CVE-2025-62727 and CVE-2026-48818 at adjusted 9.5).
+# Starlette is the ASGI core serving every route here, so these were reachable
+# from unauthenticated HTTP. 0.141.1 declares `starlette>=0.46.0`, which lets
+# starlette 1.3.1 resolve. This matches backend/requirements.txt exactly, so
+# both services now run the same web stack.
+fastapi==0.141.1
+uvicorn[standard]==0.32.1
+# starlette pinned explicitly (not just floated via fastapi) so the fix cannot
+# regress on a future resolve. Same pin as backend/requirements.txt.
+starlette==1.3.1
+# sqlalchemy — held at 2.0.36 after evaluating a bump, not by inertia.
+#
+# The A2A Compliance Report of 2026-08-27 flags this component under
+# sonatype-2021-0025 (7.5 High, SQL injection via dynamically-assembled SQL).
+# An upgrade was tested against 2.0.52 and is compatible: the backend suite
+# passes unchanged. It was NOT applied, for two independent reasons.
+#
+# 1. IT WOULD NOT CLEAR THE FINDING. sonatype-2021-0025 was published in 2021
+#    and fires against 2.0.36, released three years later. It is a
+#    Sonatype-proprietary advisory describing a CAPABILITY of the library —
+#    that text()/execute() will run whatever string you hand them — rather than
+#    a defect in any release. No version removes that capability, so no version
+#    clears the advisory. The scan report itself lists no fixed version and no
+#    recommended upgrade. What closes it is not building SQL from strings, which
+#    is enforced by backend/tests/test_no_dynamic_sql.py and recorded in
+#    security/vex/partner-platform.vex.json.
+#
+# 2. IT WOULD DEEPEN AN EXISTING BUILD DEFECT. requirements.lock is already
+#    stale (see backend/tests/test_requirements_lock_sync.py), and it cannot be
+#    regenerated without registry access and a container runtime. Editing this
+#    pin alone would add a fourth version skew between the file production
+#    installs and the file CI installs, for no security benefit.
+#
+# Bump this when there is a finding a bump actually resolves, and regenerate
+# the lock in the same change.
+sqlalchemy==2.0.36
+httpx==0.28.1
+# pydantic bumped from 2.10.3 → 2.11.10 to satisfy a2a-sdk 1.0.2's
+# pydantic>=2.11.3 floor. Bump in lockstep with backend/requirements.txt.
+pydantic==2.11.10
+pydantic-settings==2.6.1
+python-dotenv==1.2.2
+# JWT: PyJWT, replacing python-jose (2026-08-20) — bumped in lockstep with
+# backend/requirements.txt, which carries the full rationale. Short version:
+# python-jose declares `ecdsa` as an unconditional core dependency, and ecdsa
+# carries CVE-2024-23342 (HIGH) with no fix in existence, so the library had to
+# be removed rather than pinned around. PyJWT has zero required dependencies and
+# no ecdsa. 2.13.0 is the first PyJWT release with no advisories of its own.
+#
+# The `[cryptography]` extra is intentionally NOT carried over as a PyJWT
+# extra: PyJWT only needs it for RS*/ES* algorithms, and this platform is
+# HS256-only. `cryptography` is nevertheless a direct, declared dependency of
+# this service now — see the explicit pin below.
+PyJWT==2.13.0
+# cryptography — a DIRECT dependency as of the secrets-at-rest work:
+# `app/core/secret_box.py` uses Fernet (`cryptography.fernet`) to encrypt
+# provider keys and A2A secrets stored in `partner_settings.value`. This is the
+# SAME mechanism and the same `enc:v1:` token format the NPCI backend already
+# runs in production (core/app_config_sync.py, core/encrypted_type.py), so the
+# two services finally agree on one scheme rather than each carrying its own.
+# It previously arrived only transitively via google-auth, which is not a
+# contract to rely on — a transitive dep can be dropped by an upstream release
+# and would take secret decryption with it. Pinned to match the NPCI backend so
+# both resolve the same version. See docs/adr/ADR-0002-secrets-vault-migration.md.
+cryptography==50.0.0
+# pyasn1 floor — see backend/requirements.txt. Fixes CVE-2026-59884/59885/59886
+# and CVE-2026-30922 (four HIGH DoS advisories). python-jose is gone, so the
+# remaining consumers here are pyasn1-modules and google-auth.
+pyasn1==0.6.4
+bcrypt==4.2.1
+anthropic==0.42.0
+
+# OpenAI SDK — also drives AiNxt (NPCI internal OpenAI-compatible
+# gateway) via a custom base_url. Used by `app/core/llm.py` when
+# LLM_PROVIDER=openai or =ainxt. Optional at runtime — the cached
+# client only builds when actually invoked.
+openai==1.82.0
+
+# Google's official A2A protocol SDK — partner-platform mirrors the
+# platform backend's `app.a2a_common` package so both ends speak the
+# same wire format with the unified A2A refactor (Slices 1-8). Pin
+# tightly and bump in lockstep with `backend/requirements.txt`.
+a2a-sdk==1.0.2
+
+# Async SQLite driver — required by `a2a-sdk`'s `DatabaseTaskStore`,
+# which only accepts an `AsyncEngine`. The partner platform's main
+# code path used to run on sync sqlite via `app.database.engine`; that
+# main path moved to Postgres (see docs/PARTNER_POSTGRES_MIGRATION_PLAN.md),
+# but the SDK's task store remains on a separate aiosqlite pool — it
+# only persists in-flight A2A `Task` rows and doesn't need to share
+# the partner DB.
+aiosqlite==0.22.1
+
+# Postgres driver (psycopg3) for the main partner DB. SQLite was the
+# original store; we moved to a dedicated `partner_postgres` service
+# so the auto-ack thread + dashboard reads + A2A handler don't contend
+# on a single-writer file. psycopg3 is the recommended driver for
+# SQLAlchemy 2.x (better binary build, native async support if we want
+# it later).
+psycopg[binary]==3.3.4
+
+# SSE streaming dep used internally by `a2a-sdk`'s JSON-RPC adapter.
+# Same missing-hard-dep workaround as backend/requirements.txt.
+sse-starlette==3.0.3
+
+# protobuf — same reason as backend/requirements.txt: a2a-sdk 1.0.2 uses the
+# deprecated FieldDescriptor.label attribute that protobuf 6+ removed. Exact
+# pin now, but it MUST stay <6 whenever it is bumped.
+protobuf==5.29.6
+
+# YAML parser for the agent manifest (config/agents.yaml) read by
+# app/agents/loader.py. Stdlib has no YAML reader; PyYAML is the de-facto
+# standard and dependency-light.
+PyYAML==6.0.3
+
+# GitLab API client for the Code RAG (Phase 3.1) — fetches the partner's own
+# repo source over the API to chunk + embed into pgvector. Pinned in lockstep
+# with the NPCI backend's python-gitlab.
+python-gitlab==4.9.0
+
+# Markdown → .docx / .pptx synthesis for the partner download endpoints.
+# When NPCI's change_communication payload arrives without binary bytes
+# attached (path resolution miss on sender, or files not yet generated),
+# the partner platform always has the markdown `content` and synthesises
+# the binary on the fly so every doc remains downloadable in the format
+# the NPCI portal advertises. See `dashboard.markdown_to_*_bytes`.
+python-docx==1.1.2
+python-pptx==1.0.2
+
+# ReportLab — renders the NPCI certification sign-off PDF on demand
+# (see api/dashboard/certification.py::cert_signoff_pdf). Pure-python,
+# no native deps; ~5MB in the image.
+reportlab==4.2.5
+
+# Testing. `tests/` and the pytest config in pyproject.toml have been here all
+# along, but pytest itself was never installed — so the command # documents (`docker compose run --rm partner_backend pytest`) failed with
+# "executable file not found" and this suite had effectively never run.
+# Version in lockstep with backend/requirements.txt. No pytest-asyncio: there
+# are zero `async def test_` functions here (the async defs in tests are mock
+# coroutines), so the plugin would be dead weight.
+pytest==9.0.3
+
+# OPTIONAL — not installed by default, and deliberately not in requirements.lock.
+# Only needed to enable the SHARED A2A rate-limit window
+# (PARTNER_RATE_LIMIT_REDIS_URL, see a2a_common/rate_limit_middleware.py), which
+# matters solely for multi-worker / multi-replica deployments. Most partner forks
+# run a single instance and need neither the package nor a redis to run. Install
+# it explicitly when scaling horizontally:
+#     pip install 'redis==5.2.1'
+# redis==5.2.1

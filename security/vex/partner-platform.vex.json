@@ -1,0 +1,179 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-08-28T00:00:00Z",
+    "component": {
+      "type": "application",
+      "name": "partner-platform",
+      "version": "1.0.0",
+      "bom-ref": "pkg:generic/partner-platform@1.0.0"
+    },
+    "authors": [
+      {
+        "name": "Partner Platform Engineering",
+        "email": "security@partner-platform.invalid"
+      }
+    ],
+    "supplier": {
+      "name": "Partner Platform Engineering"
+    },
+    "properties": [
+      {
+        "name": "vex:scope",
+        "value": "Addresses the three Security policy violations in the A2A Compliance Report dated 2026-08-27 (sqlalchemy 2.0.36, pyjwt 2.13.0, react 19.2.5), all of which were reported with ANALYSIS STATE = Unannotated."
+      },
+      {
+        "name": "vex:why-annotation-and-not-upgrade",
+        "value": "Version is not the lever for any of these three. sonatype-2021-0025 (published 2021) fires against sqlalchemy 2.0.36, released three years LATER; sonatype-2017-0717 (published 2017) fires against react 19.2.5, released nine years later. Both are Sonatype-proprietary advisories describing library CAPABILITIES that can be misused, so they apply to every release of their library. For CVE-2025-45768 the scan itself is the evidence: pyjwt 2.13.0 already emits jwt.warnings.InsecureKeyLengthWarning for HMAC keys under 32 bytes, citing RFC 7518 Section 3.2 -- and 2.13.0 is nonetheless the version reported as violating. An upgrade therefore cannot clear any of the three. What clears them is a recorded triage decision backed by an enforced control."
+      },
+      {
+        "name": "vex:dependency-changes",
+        "value": "Zero packages were added, removed or upgraded. This is now a RESULT rather than a constraint: an upgrade path was evaluated after the no-change constraint was lifted, and rejected on evidence (see vex:upgrade-evaluation). backend/requirements.txt, backend/requirements.lock and frontend/package-lock.json are unchanged apart from line endings, verified by normalising CRLF and re-hashing against git HEAD."
+      },
+      {
+        "name": "vex:upgrade-evaluation",
+        "value": "sqlalchemy 2.0.36 -> 2.0.52 was tested: the backend suite (380 tests) passes against 2.0.52, which happens to be the interpreter-local version, so the bump is empirically compatible. It was NOT applied, for two reasons. First, it cannot clear sonatype-2021-0025, which is version-independent (see vex:why-annotation-and-not-upgrade). Second, backend/Dockerfile installs from the hash-locked closure with --require-hashes, and requirements.lock cannot be regenerated in this environment (no registry reachability, no container runtime). Editing requirements.txt alone would desynchronise it from the lock and every hash-checked install would fail closed -- breaking the binding constraint that the application keeps working. Bumping the pin is a change to make deliberately, with lock regeneration, when there is a finding it actually resolves."
+      },
+      {
+        "name": "vex:enforcement",
+        "value": "Every claim below is backed by an automated test that fails when the claim stops being true, and every one of those tests has been shown to FAIL against a deliberately injected violation. An unenforced 'not affected' decays into a false audit record, which in a regulated NPCI context is worse than an open low-severity finding."
+      },
+      {
+        "name": "vex:pipeline-status",
+        "value": "HONEST LIMITATION AT TIME OF WRITING. A VEX document only changes a scan result if the scanner ingests it. Until this file is wired into the pipeline that produced the A2A Compliance Report, these three findings will continue to report as Unannotated regardless of how accurate the analysis below is. See security/vex/README.md for the wiring, and scripts/merge_vex.py to merge these annotations into a generated CycloneDX SBOM before upload."
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/sqlalchemy@2.0.36",
+      "name": "sqlalchemy",
+      "version": "2.0.36",
+      "purl": "pkg:pypi/sqlalchemy@2.0.36"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pyjwt@2.13.0",
+      "name": "pyjwt",
+      "version": "2.13.0",
+      "purl": "pkg:pypi/pyjwt@2.13.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/react@19.2.5",
+      "name": "react",
+      "version": "19.2.5",
+      "purl": "pkg:npm/react@19.2.5"
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "bom-ref": "vex-sonatype-2021-0025-sqlalchemy",
+      "id": "sonatype-2021-0025",
+      "source": {
+        "name": "Sonatype",
+        "url": "https://ossindex.sonatype.org/"
+      },
+      "ratings": [
+        {
+          "source": { "name": "Sonatype" },
+          "score": 7.5,
+          "severity": "high",
+          "method": "CVSSv3"
+        }
+      ],
+      "cwes": [89],
+      "description": "Sonatype-proprietary advisory against SQLAlchemy concerning SQL injection reachable through dynamically-assembled SQL (string construction passed to text()/execute()). No fixed version is published, because the advisory describes a usage pattern rather than a defect in a specific release.",
+      "affects": [
+        {
+          "ref": "pkg:pypi/sqlalchemy@2.0.36"
+        }
+      ],
+      "analysis": {
+        "state": "not_affected",
+        "justification": "protected_by_mitigating_control",
+        "response": ["will_not_fix"],
+        "detail": "NOT AFFECTED -- no attacker-influenced value reaches a SQL string in this application, and a build-failing static check keeps it that way.\n\nWHY THIS JUSTIFICATION AND NOT 'code_not_reachable'. An earlier revision of this document claimed code_not_reachable. That was wrong and is corrected here. SQLAlchemy's text() IS called, on every retrieval and ingest path -- the vulnerable capability is very much reachable. What is absent is dynamic ASSEMBLY of the string handed to it. protected_by_mitigating_control is the accurate justification, and it is the one an auditor can check against the code.\n\nEVIDENCE. Every database access is either the SQLAlchemy ORM or a module-level static text() statement with bound parameters. As of this annotation there are zero occurrences of an f-string, %-format, .format(), + concatenation or .join() result reaching text(), _sql(), execute(), executemany() or exec_driver_sql() anywhere under backend/app, other than the two allowlisted DDL sites described below.\n\nWHAT CHANGED. Two sites previously assembled their WHERE clause at call time. Both were safe at runtime (the interpolated fragments were hardcoded predicate literals and all values were bound) but were not safe by construction, and both were the exact pattern this advisory reports:\n  1. app/rag/doc_ingest.py::_delete_chunks built `WHERE {' AND '.join(clauses)}`. It now dispatches to one of EIGHT enumerated module-level constants through an exact-key lookup on (change_id is not None, repo_id is not None, source_key is not None).\n     CORRECTION TO A PREVIOUS CLAIM: an earlier revision said 'six enumerated constants'. That was literally true and was the bug. Six constants cannot cover eight scope combinations, and the if/elif chain that selected among them tested repo_id before change_id, so a call passing BOTH silently dropped the `change_id = :cid` predicate and deleted a WIDER set of rows than requested. This was a real correctness and data-integrity defect introduced by the hardening itself, found by differential testing against the original dynamic builder (12 mismatches across 2 of the 8 combinations). It is fixed, and backend/tests/test_delete_chunks_scoping.py (27 tests) now pins the scoping contract independently of the implementation -- including execution against a real database to confirm only in-scope rows are removed. Reinstating the old selection logic makes 7 of those tests fail.\n  2. app/rag/retrieval.py::retrieve built `WHERE {' OR '.join(clauses)}`. It now uses one static statement, _RETRIEVE_SQL, in which the three optional scopes are switched on and off by bound boolean parameters (:want_change / :want_kb / :want_code) instead of by editing the SQL text. Equivalence to the previous dynamic query was verified by differential execution across 675 cases (every combination of the 8 category subsets, change_id present/absent, repo_id present/absent, and a spread of stored rows), with zero divergence.\n\nTHE ONE REMAINING INTERPOLATION. app/database.py builds two CREATE TABLE statements containing a pgvector column width (`vector(768)`). PostgreSQL does not accept a bind parameter inside a type declaration, so `vector(:dim)` is not valid SQL and interpolation is unavoidable. The value is hardened at the point of use by database._vector_dim(), which re-coerces through int() and range-checks 1..2000, so only a small positive integer can reach the string. These two sites are the sole entries in the test allowlist and are re-verified by test_allowlist_entries_still_exist.\n\nENFORCEMENT, AND ITS STATED BOUNDARY. backend/tests/test_no_dynamic_sql.py walks the AST of every file under backend/app and fails the build if a dynamically-built string reaches a SQL executor. It carries intra-procedural taint tracking, so it catches the realistic case where the string is built on one line and executed on another, and it names the ASSIGNMENT line rather than only the sink. It is verified non-vacuous against 10 injected payloads and verified not to fire on 5 safe shapes.\n\nThe boundary is stated rather than glossed: the analysis is intra-procedural. Taint stored on an object attribute, passed as a parameter into a helper, or routed through a container is NOT detected, except where a helper's return value is itself recognised as a dynamic builder. The supportable claim is 'no dynamic SQL in the shapes this guard covers, and those shapes include every pattern previously present in this codebase' -- not 'provably no dynamic SQL by any means'. That gap is asserted as a known limitation in test_guard_limitations_are_documented, so closing it later forces this wording to be revisited."
+      },
+      "properties": [
+        {
+          "name": "vex:enforced-by",
+          "value": "backend/tests/test_no_dynamic_sql.py, backend/tests/test_delete_chunks_scoping.py"
+        }
+      ]
+    },
+    {
+      "bom-ref": "vex-cve-2025-45768-pyjwt",
+      "id": "CVE-2025-45768",
+      "source": {
+        "name": "NVD",
+        "url": "https://nvd.nist.gov/vuln/detail/CVE-2025-45768"
+      },
+      "ratings": [
+        {
+          "source": { "name": "NVD" },
+          "score": 6.3,
+          "severity": "medium",
+          "method": "CVSSv3"
+        }
+      ],
+      "cwes": [326],
+      "description": "PyJWT does not ENFORCE a minimum key length when signing with HMAC algorithms, so an application may sign HS256 tokens with a weak, guessable secret. Contested by PyJWT upstream on the grounds that RFC 7515 leaves key-strength policy to the application.",
+      "affects": [
+        {
+          "ref": "pkg:pypi/pyjwt@2.13.0"
+        }
+      ],
+      "analysis": {
+        "state": "not_affected",
+        "justification": "protected_by_mitigating_control",
+        "response": ["will_not_fix"],
+        "detail": "NOT AFFECTED -- the condition the CVE describes (an under-strength HMAC key used to sign production tokens) cannot occur, because this application enforces a key-strength policy that the library only advises on.\n\nCORRECTION OF A PREVIOUS OVERCLAIM. An earlier revision of this document asserted that PyJWT performs no key-strength checking at all, by design, and that no fix for this existed or was planned. Both assertions are false, and an auditor with a Python prompt would have found that in under a minute. They are withdrawn. Verified against the installed 2.13.0:\n  - jwt.warnings.InsecureKeyLengthWarning EXISTS and is raised on both encode and decode: signing with a 5-byte key emits 'The HMAC key is 5 bytes long, which is below the minimum recommended length of 32 bytes for SHA256. See RFC 7518 Section 3.2.'\n  - HMACAlgorithm.prepare_key raises InvalidKeyError on an empty key, on PEM/SSH material, and on a JWK passed as raw JSON (an algorithm-confusion defence).\nPyJWT has therefore already done meaningful work in this area. The residual gap is narrower than previously claimed, and this annotation now rests only on that residue.\n\nTHE ACTUAL RESIDUAL GAP -- three things a library warning cannot do.\n  1. A warning does not stop a process. warnings.warn() writes to stderr once per location and execution continues, so a production instance signing with a 5-byte secret still starts, still issues tokens, and still authenticates operators. Under the default warning filters it may not be displayed at all.\n  2. The library only sees the key at signing time. By then the deploy has succeeded and sessions are already being issued. A startup-time check fails the deploy instead.\n  3. Length is not strength. PyJWT's check is purely `len(key_bytes) < 32`. 'a' * 32 and 'CorrectHorseBatteryStaple!!!!!!!' both pass it silently -- confirmed: neither emits any warning. Guessability is a property only the application can judge.\n\nSO THE CONTROL IS COMPLEMENTARY, NOT A REIMPLEMENTATION. It converts advice into enforcement, moves the check from signing time to startup and write time, and adds the structural judgement the library does not attempt.\n\nTHE GAP THAT WAS CLOSED. This platform is HS256-only. Before this change, startup validated only that SESSION_JWT_SECRET was NON-EMPTY, so SESSION_JWT_SECRET=abc would start a production instance signing forgeable operator sessions. The two NPCI-issued secrets (npci_jwt_secret, npci_hmac_secret) had no strength validation at all.\n\nTHE CONTROL. backend/app/core/key_strength.py enforces RFC 7518 Section 3.2 for HS256: a minimum of 32 UTF-8 BYTES (256 bits, matching the SHA-256 output width and matching what PyJWT actually hashes). Length alone is insufficient, so the check also requires at least 64 bits of TOTAL Shannon entropy and rejects padding runs, short units tiled or near-tiled to length, dictionary-word structure, known md5/sha1/sha256 hex digests of common passwords, and a list of placeholder tokens.\n\nA NOTE ON HOW THE METRICS WERE CHOSEN, BECAUSE THE OBVIOUS ONES ARE WRONG. The previous revision floored on distinct-character count (>= 10) and per-character entropy (>= 3.0 bits). Calibration over 30,000 samples per format (reproducible via backend/scripts/calibrate_key_strength.py) showed those two metrics are ANTI-CORRELATED with guessability: a legitimate secrets.token_hex(16) key scores 9 distinct characters and 2.78 bits per character and was REJECTED, while the weak passphrase 'CorrectHorseBatteryStaple' scores 25 distinct and 4.38 bits per character and was ACCEPTED. Hex alphabets are small by construction; English prose is character-rich by construction. Both floors were removed in favour of total entropy plus structural checks.\n\nWHERE IT IS APPLIED.\n  - SESSION_JWT_SECRET: validated at startup in app/config.py. Always fatal in production. In non-production it logs at ERROR and can be made fatal with ENFORCE_HMAC_KEY_STRENGTH=true -- a deliberate two-stage rollout so that environments already holding a weak secret surface it before a hard failure blocks a deploy.\n  - npci_jwt_secret and npci_hmac_secret: validated on WRITE in PUT /api/settings (app/api/dashboard/settings.py), rejecting with HTTP 400. These live in partner_settings and are installed at runtime, so they cannot be checked at startup. Validating on write gives the operator immediate, correctable feedback instead of a fail-closed ingress with no visible cause. Rejection happens before the single db.commit(), and _upsert() never commits on its own, so a rejected write persists nothing.\n\nNO SECRET DISCLOSURE. Rejection messages describe the shape of the problem and never echo the value. The only value-derived text ever emitted is a matched placeholder token drawn from a fixed public list.\n\nFALSE-POSITIVE SAFETY, WITH THE REAL NUMBERS AND WHERE EACH ONE COMES FROM. A spurious rejection of a legitimate NPCI-issued key would block partner onboarding, so this was measured rather than assumed. Two distinct figures, kept distinct on purpose:\n  - IN THE TEST SUITE, on every run: 18 legitimate generation formats (token_urlsafe, token_hex and base64 at several widths, padded base64, uuid4 single and doubled, uppercase hex, grouped hex, npci_live_-prefixed, base32, numeric 32 and 40, mixed-case alphanumeric) x 2,000 samples each = 36,000 keys, zero false rejections. The per-run count is deliberately modest so the suite stays fast enough that nobody is tempted to skip it.\n  - AS A ONE-OFF VERIFICATION SWEEP, at 30,000 samples per format: 480,000 keys, zero false rejections.\nAgainst 17 weak values spanning every rejection category: zero false acceptances.\n\nAn earlier revision of this document cited a substantially larger sample and described it as what the tests run. That conflated a one-off sweep with the standing suite and the figure was not reproducible; it is withdrawn in favour of the two numbers above, each labelled with how it was obtained. TWO CALIBRATION DEFECTS WERE FOUND THIS WAY, BOTH PRESENTING AS FLAKINESS. The first revision rejected roughly 1 in 1,000 valid keys and failed intermittently on token_hex(16). The second still failed about 1 run in 10, always on the same case: its padding-run threshold was 8, but measurement over 300,000 samples per format showed token_hex(32) legitimately produces runs of 9 (base64 5, base32 5, uuid4 6, numeric 7, token_hex(16) 7). A threshold below the observed maximum is not unlucky, it is certain to misfire — and at a rate low enough that an operator blames the tooling rather than the rule. Raised to 12, where a run occurs by chance about 1 in 440 billion for hex and 1 in 2.5 billion for digits, with no loss of detection (every weak value pads with a run of 30 or more). The suite then passed 20 consecutive runs. The threshold is pinned against the measured maxima by test_padding_run_threshold_exceeds_what_real_csprng_output_produces, which asserts the invariant directly rather than by sampling, so the guard cannot itself become the flake. The regression is pinned by test_no_false_positives_on_generated_keys, and the anti-correlation finding above is pinned by test_metrics_cannot_separate_by_frequency_alone so it cannot be quietly reintroduced.\n\nENFORCEMENT. backend/tests/test_key_strength.py (66 tests: policy rules, boundary conditions, false-positive stress) and backend/tests/test_settings_secret_strength.py (HTTP boundary: rejection, non-persistence, transaction atomicity, no leakage). CAVEAT ON THE SECOND FILE: it imports the application, which pulls in a2a-sdk, so it does not execute in an environment where that package is absent. Its assertions about the HTTP boundary were confirmed by code inspection, not by a local run. Treat it as verified only where CI installs the full dependency set."
+      },
+      "properties": [
+        {
+          "name": "vex:enforced-by",
+          "value": "backend/tests/test_key_strength.py, backend/tests/test_settings_secret_strength.py"
+        }
+      ]
+    },
+    {
+      "bom-ref": "vex-sonatype-2017-0717-react",
+      "id": "sonatype-2017-0717",
+      "source": {
+        "name": "Sonatype",
+        "url": "https://ossindex.sonatype.org/"
+      },
+      "ratings": [
+        {
+          "source": { "name": "Sonatype" },
+          "score": 2.1,
+          "severity": "low",
+          "method": "CVSSv3"
+        }
+      ],
+      "cwes": [79],
+      "description": "Sonatype-proprietary advisory noting that React's dangerouslySetInnerHTML API renders unescaped HTML and is an XSS vector when supplied with untrusted content. Applies to every React release; no fixed version exists.",
+      "affects": [
+        {
+          "ref": "pkg:npm/react@19.2.5"
+        }
+      ],
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_present",
+        "response": ["will_not_fix"],
+        "detail": "NOT AFFECTED -- the API this advisory describes is not used anywhere in the application.\n\nEVIDENCE, RE-VERIFIED FOR THIS REVISION.\n  1. dangerouslySetInnerHTML appears 0 times under frontend/src.\n  2. Markdown is rendered by react-markdown in four components (CodePanel, DesignPanel, TestingPanel, ChangeDetail) WITHOUT rehype-raw. react-markdown builds a React element tree from an AST and escapes embedded raw HTML to visible text, so markdown containing a script tag renders as characters rather than as a DOM node. rehype-raw appears 0 times in package.json and 0 times in package-lock.json.\n  3. There are no direct DOM escape hatches: 0 occurrences of innerHTML, outerHTML, insertAdjacentHTML or document.write under frontend/src.\n\nTHE ONE HTML SURFACE, AND WHY IT IS SAFE. The prototype-preview feature renders generated HTML into an iframe via srcDoc (ChangeDetail.jsx, two call sites, both through hardenFrameHtml). Inline scripts are required for the click-through prototype to function, so the goal is not 'no script' but 'script that can do no harm'. Two independent controls apply (frontend/src/utils/safeHtmlFrame.js):\n  - sandbox WITHOUT allow-same-origin, placing the frame in an opaque origin so it cannot read the parent DOM, cookies or storage; and\n  - an injected Content-Security-Policy of default-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none', which removes all network egress, so a malicious or prompt-injected payload cannot exfiltrate what it renders.\nNote that this surface is outside the advisory's scope in any case -- it is an iframe, not dangerouslySetInnerHTML -- but it is the place a reviewer will look, so it is documented here rather than omitted.\n\nNO CODE CHANGE WAS REQUIRED for this finding; the application was already clear. What was added is the guarantee that it stays clear.\n\nENFORCEMENT. frontend/test/noRawHtml.test.mjs (npm test) scans every source file for the banned sinks, fails if rehype-raw or a rehype-dangerous* package is declared in package.json, and asserts that the srcDoc CSP directives and the sandbox-without-allow-same-origin posture are still present. It is dependency-free -- implemented with Node's standard library -- specifically so that hardening an SBOM finding does not itself add SBOM components. Verified to fail on an injected dangerouslySetInnerHTML and on an injected rehype-raw dependency.\n\nA BYPASS IN THE GUARD ITSELF WAS FOUND AND FIXED. The CSP-presence check read the RAW file while the sink checks read a comment-stripped copy, so writing the required directive names inside a JavaScript comment satisfied the check while the actual CSP could be removed. Adversarial testing surfaced this; the check now strips comments first and additionally asserts that a meta http-equiv CSP tag is genuinely emitted. The suite runs 200 checks."
+      },
+      "properties": [
+        {
+          "name": "vex:enforced-by",
+          "value": "frontend/test/noRawHtml.test.mjs"
+        }
+      ]
+    }
+  ]
+}

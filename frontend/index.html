@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         CLICKJACKING DEFENCE — three layers, deliberately.
+
+         Checkmarx "Potential Clickjacking on Legacy Browsers"
+         (JavaScript\Cx\JavaScriptLowVisibility, v6) reports against THIS FILE,
+         at line 1. That is the whole point of the query: it is a static check
+         on the HTML document, and it is looking for a frame-busting script
+         inside the document. HTTP response headers set by nginx are invisible
+         to it — the scanner never makes a request — so no amount of
+         `add_header` in deploy/edge.nginx.conf will ever close it.
+
+         Layer 1 — CSP `frame-ancestors` response header (deploy/edge.nginx.conf)
+           The real control for every browser released in the last decade.
+
+         Layer 2 — X-Frame-Options: DENY response header (deploy/edge.nginx.conf)
+           For browsers that predate CSP Level 2.
+
+         Layer 3 — the <style> + <script> pair below: the frame buster.
+           For browsers that honour NEITHER header. This is the layer the
+           Checkmarx query is asking for, and it is the layer that was missing.
+
+         ── There is deliberately NO CSP <meta> tag here ─────────────────────
+         One used to stand here carrying `frame-ancestors 'none'`, and it was
+         removed rather than kept as documentation-of-intent. Two reasons.
+
+         First, it never worked. `frame-ancestors` is explicitly ignored when
+         delivered in a <meta> http-equiv tag — CSP Level 3 §3.3 lists it
+         alongside `report-uri` and `sandbox` as directives that "will be
+         ignored" outside an HTTP header. Confirmed in Chrome: a page whose only
+         frame-ancestors came from a <meta> tag was framed successfully by a
+         foreign origin, while the identical policy sent as a header blocked it.
+
+         Second, keeping it was actively harmful. Checkmarx
+         "Permissive Content Security Policy" (Python\Cx\PythonLowVisibility,
+         v2, path 26, scanid 1016302) reported THIS FILE at the meta tag: a
+         policy whose entire content is one framing directive restricts nothing
+         about script, object or connect sources, so a scanner correctly reads
+         it as an overly permissive CSP. A control that enforces nothing while
+         appearing in a scan as the app's security policy is worse than no tag.
+
+         The real policy is the CSP response header emitted by nginx, built at
+         image-build time by frontend/scripts/generate-csp.mjs (which hashes the
+         inline <style> and <script> below so they keep working under a strict
+         `script-src` with no 'unsafe-inline'). frontend/test/cspPolicy.test.mjs
+         fails the build if a CSP meta tag reappears in this file, or if those
+         hashes drift out of step with the markup.
+         ══════════════════════════════════════════════════════════════════════ -->
+
+    <!-- Frame buster, step 1 of 2: hide the UI BEFORE it can be rendered.
+         Ordering matters. The document is hidden by default and only revealed
+         once the script below proves we are the top-level window. Doing it in
+         this order means that a browser which blocks or fails the script leaves
+         the page blank — invisible and non-interactive — rather than framed and
+         clickable. Checkmarx's own guidance calls for exactly this: disable the
+         UI first, "such that even if frame-busting is successfully evaded, the
+         UI cannot be clicked."
+
+         `display:none` on <html> (not <body>): a hostile parent can sometimes
+         interfere with a <body>-level rule, and <html> is available earlier. -->
+    <style id="antiClickjack">html { display: none !important; }</style>
+    <script>
+      // Frame buster, step 2 of 2: reveal the UI only if we are not framed.
+      //
+      // This runs synchronously in <head>, before any application code, so
+      // there is no window in which a framed page is both visible and live.
+      (function () {
+        'use strict';
+
+        function reveal() {
+          var s = document.getElementById('antiClickjack');
+          if (s && s.parentNode) s.parentNode.removeChild(s);
+          document.documentElement.style.display = '';
+        }
+
+        var framed;
+        try {
+          // `self === top` is the check. Reading `top` can itself throw in some
+          // sandboxed contexts; if it does, we are certainly not the top-level
+          // document, so treat the throw as "framed" and stay hidden.
+          framed = self !== top;
+        } catch (e) {
+          framed = true;
+        }
+
+        if (!framed) {
+          reveal();
+          return;
+        }
+
+        // We are framed. Try to break out by navigating the top window to us.
+        // This is best-effort: a cross-origin or `sandbox`-ed parent will block
+        // it, and modern frame-buster-busters exist specifically to defeat it.
+        // That is fine — the navigation is the *bonus*, not the protection. The
+        // protection is that we never call reveal(), so the document stays
+        // display:none: not rendered, not clickable, nothing to hijack.
+        try {
+          top.location = self.location;
+        } catch (e) {
+          /* Blocked by the framing page. Intentionally ignored — staying
+             hidden is already the safe state. */
+        }
+      })();
+    </script>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Partner Platform</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

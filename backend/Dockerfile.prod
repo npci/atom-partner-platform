@@ -1,0 +1,30 @@
+# ============================================================================
+# Partner Backend — Production Dockerfile (Air-gapped / Nexus Repo)
+#
+# Uses ${REGISTRY} for all package downloads.
+# No internet access required.
+#
+# Usage:
+#   docker build -f Dockerfile.prod -t partner-backend:prod .
+#
+# Prerequisites on Nexus (${REGISTRY}):
+#   - Docker registry proxy: ${REGISTRY}/docker-hub/
+#   - PyPI proxy:            ${REGISTRY}/pypi-proxy/simple/
+# ============================================================================
+
+ARG REGISTRY=docker.io
+FROM ${REGISTRY}/docker-hub/python:3.12-slim
+
+WORKDIR /app
+
+# Python packages — use internal PyPI mirror
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    --index-url http://${REGISTRY}/pypi-proxy/simple/ \
+    --trusted-host ${REGISTRY} \
+    -r requirements.txt
+
+COPY . .
+
+EXPOSE 8001
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

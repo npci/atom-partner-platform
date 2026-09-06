@@ -1,0 +1,31 @@
+# Root ignores. Component-specific rules stay with their component:
+#   backend/.gitignore, frontend/.gitignore
+# TLS material is kept out by deploy/tls/.gitignore.
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors and local overrides
+.idea/
+.vscode/
+*.swp
+*~
+docker-compose.override.yml
+
+# System-under-test build artifacts (Maven target dirs, jars) — the SUT SOURCE
+# is committed; its build output is not.
+sut/**/target/
+# Agentic-workspace bookkeeping left by the rsync of the SUT source
+sut/nlln-app/.base_sha
+sut/nlln-app/.lease
+
+# Environment — never commit a populated env file
+.env
+.env.*
+!.env.example
