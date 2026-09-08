@@ -1,0 +1,62 @@
+# Agent manifest — wires each agent the platform orchestrates.
+#
+# Per agent, declare ONE binding:
+#   impl: module:Class   → shipped Python class, runs in-process (default)
+#   url:  https://...     → a service YOU host; platform calls it over HTTP
+#   mcp:  {...}           → an MCP server YOU host (designed-for; NOT built yet)
+#
+# Optional per agent: prompt (file in app/agents/prompts/), provider, model, enabled.
+# NEVER put secrets here — LLM keys live in env / the Settings UI (partner_settings).
+# Override this file's location with the AGENTS_CONFIG env var.
+
+agents:
+  feasibility:
+    impl: app.agents.feasibility:FeasibilityAgent
+    prompt: feasibility.md
+    enabled: true
+    # provider: claude        # optional override of the global LLM_PROVIDER
+    # model: claude-opus-4-8  # optional per-agent model override
+
+  design:
+    impl: app.agents.design:DesignAgent
+    prompt: design.md
+    enabled: true
+
+  code:
+    impl: app.agents.code:CodeAgent
+    prompt: code.md
+    enabled: true
+
+  test:
+    impl: app.agents.testing:TestAgent
+    prompt: test.md
+    enabled: true
+
+  negotiation:
+    impl: app.agents.negotiation:NegotiationAgent
+    prompt: negotiation.md
+    enabled: true
+
+  # Review step — two lenses over the generated files (the review/fix loop).
+  # ANY finding from either blocks the merge request until corrected.
+  code_reviewer:
+    impl: app.agents.code_reviewer:CodeReviewerAgent
+    prompt: code_reviewer.md
+    enabled: true
+
+  security_reviewer:
+    impl: app.agents.security_reviewer:SecurityReviewerAgent
+    prompt: security_reviewer.md
+    enabled: true
+
+  # ── Want a bank to host an agent instead of running shipped code? ──
+  # Change ONE line — no code edit. Example (HTTP service you host):
+  # code:
+  #   url: https://bank-host/agents/code
+  #   auth: bearer            # token from $AGENT_SERVICE_TOKEN
+  #   timeout_s: 30
+  #   retries: 2
+  #
+  # Future (designed-for, not built this pass) — MCP server you host:
+  # code:
+  #   mcp: { transport: streamable-http, server: https://bank-host/mcp, tool: assess_code }

@@ -1,0 +1,14 @@
+{
+  "term.authority": "NPCI",
+  "term.authorityCap": "NPCI",
+  "term.authorityOrg": "NPCI UPI Change Management",
+  "term.partnerShort": "BANK",
+  "ph.repo.name": "e.g. UPI Core Platform",
+  "ph.kb.title": "Title (e.g. UPI 2.0 Technical Spec)",
+  "cert.reportTitle": "UPI Certification Report",
+  "cert.filePrefix": "NPCI_Certification",
+  "ph.authorityUrl": "https://npci-platform.example.com",
+  "ph.repo.project": "my-bank/upi-switch",
+  "ph.profile.stub": "---\npartner: Your Bank\nprofile_version: 1.0\n---\n\n# Partner Profile\n\n## Quick reference\n- UPI roles played: ...",
+  "ph.queryExample": "e.g. Do the cert windows in section 4.1 include the freeze week before Diwali, or is that excluded?"
+}

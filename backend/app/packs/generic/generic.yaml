@@ -1,0 +1,77 @@
+# Copyright 2026 National Payments Corporation of India
+# SPDX-License-Identifier: MIT
+#
+# The default pack, used when DOMAIN_PACK is unset.
+#
+# Deliberately says nothing about any industry. A deployment that never
+# configures a pack should produce prose that is bland but never WRONG — the
+# failure mode to avoid is a library network generating documents that talk
+# about payment rails. Every value here is chosen so that it reads acceptably
+# in a domain nobody anticipated.
+#
+# `roles` is intentionally EMPTY. There is no neutral guess at what roles an
+# unknown ecosystem has, and inventing four placeholder roles would be worse
+# than none: the UI would offer selections that mean nothing and the cert flow
+# would collect identifiers no one can supply. A deployment configures roles or
+# does not use the role-scoped flow.
+
+pack: generic
+
+prompt_blocks:
+  # How to refer to the body that publishes changes. Mid-sentence and
+  # sentence-initial forms, because English needs both and a single value
+  # renders "the authority has proposed…" at the start of a sentence.
+  authority: the authority
+  authority_cap: The authority
+
+  # What kind of organisation this platform's operator is.
+  partner_descriptor: an ecosystem partner organisation
+  partner_employer: an organisation that participates in a governed ecosystem
+  reviewer_employer: a participating organisation
+
+  # What arrives from the authority, and what the ecosystem is called.
+  domain_name: the ecosystem
+  change_descriptor: a specification change
+  artifact_kinds: requirements, technical specification, and certification test cases
+
+  # Prepended to the security review. Sets the threat model, so it is
+  # domain-sensitive: "this is payments code" steers a reviewer differently
+  # from "this is catalogue code".
+  code_context: >-
+    This is integration code for a governed ecosystem where correctness and
+    backward compatibility are contractual — the bar is high.
+
+  # No domain knowledge to offer. The suggester still derives its field names
+  # from `roles:`, so an empty block degrades to "use the change documents"
+  # rather than to guidance invented for the wrong industry.
+  test_data_guidance: ""
+
+roles: []
+
+signoff:
+  # Empty on purpose. An unconfigured deployment must not print SOMEONE's name
+  # as the issuing body of a document it signs; the masthead omits the issuer
+  # line entirely rather than inventing one.
+  issuer: ""
+  programme: Certification
+  signatory: Certification & Compliance Office
+  # Slate. Neutral by construction — not any organisation's brand colour.
+  accent: "#334155"
+  authority_short: AUTHORITY
+  partner_short: PARTNER
+  # Empty for the same reason as `issuer`. A place of issue is an assertion about
+  # where a signed document was executed, and the generic pack has no standing to
+  # make one — the attestation omits the clause rather than naming a city nobody
+  # configured.
+  issued_at: ""
+
+# No `cert_profile` and no `cert_case_data` on purpose, and this is the whole
+# point of moving them here. They used to be hardcoded in the handler as a
+# fictional bank — IFSC, NBIN, PSP handle, MPIN, "UPI 2.x" — merged UNDER every
+# submission, so a deployment that had configured nothing still transmitted a
+# payments identity on its first certification handshake, and one that had
+# configured PART of a profile silently inherited the rest.
+#
+# An unconfigured deployment now submits only what its operator actually set,
+# and the handler says so in the log rather than inventing a participant. Same
+# rule as `roles: []` above: no neutral guess exists, so none is made.

@@ -1,0 +1,49 @@
+# ============================================================================
+# Partner Backend — Production Dockerfile (Air-gapped / Nexus Repo)
+#
+# Uses ${REGISTRY} for all package downloads.
+# No internet access required.
+#
+# Usage:
+#   docker build -f Dockerfile.prod -t partner-backend:prod .
+#
+# Prerequisites on Nexus (${REGISTRY}):
+#   - Docker registry proxy: ${REGISTRY}/docker-hub/
+#   - PyPI proxy:            ${REGISTRY}/pypi-proxy/simple/
+# ============================================================================
+
+ARG REGISTRY=docker.io
+FROM ${REGISTRY}/docker-hub/python:3.12-slim
+
+WORKDIR /app
+
+# Python packages — use internal PyPI mirror.
+#
+# Three things here used to be weaker than the dev image next door, which is
+# backwards for the artifact that actually ships:
+#
+#  * the index was http:// with --trusted-host, i.e. TLS deliberately switched
+#    off, so every wheel arrived over an unauthenticated channel;
+#  * it installed requirements.txt, which pins VERSIONS only, while the dev
+#    image installs the hash-locked closure. A substituted artifact at a
+#    pinned version was accepted here and rejected there;
+#  * no USER, so the container ran as root.
+#
+# The index is now https. If a Nexus mirror genuinely has no TLS, override
+# REGISTRY_SCHEME at build time rather than editing this line, so the
+# insecure choice is visible in the build command:
+#   docker build --build-arg REGISTRY_SCHEME=http ...
+ARG REGISTRY_SCHEME=https
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes \
+    --index-url ${REGISTRY_SCHEME}://${REGISTRY}/pypi-proxy/simple/ \
+    -r requirements.lock
+
+COPY . .
+
+RUN adduser --disabled-password --no-create-home --gecos "" appuser \
+    && chown -R appuser /app
+USER appuser
+
+EXPOSE 8001
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]

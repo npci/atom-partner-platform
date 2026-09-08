@@ -1,0 +1,22 @@
+# Local env must NOT be baked into the image — pydantic-settings reads
+# /app/.env at runtime, and a stale baked copy silently shadows the
+# values compose injects via env_file/environment (caused a Postgres-era
+# crash when an old DATABASE_PATH lingered in the image).
+.env
+
+# Build/runtime noise that has no business in the image.
+__pycache__/
+*.pyc
+data/*.db
+.pytest_cache/
+
+# Test suite: not executed in the runtime image, and its fixtures contain
+# deliberately hardcoded secrets ("shared-jwt-secret", "legacy-gcm-secret", ...)
+# that exist purely to assert the crypto and fail-closed auth paths behave.
+# Shipping them widens the image's attack surface for no benefit and puts
+# credential-shaped literals into a production artifact — which is also why
+# .checkmarx/cx.config.json excludes this folder from the scan. Keeping BOTH in
+# step matters: the scan exclusion is only honest if the code really is absent
+# from what deploys.
+tests/
+requirements-dev.txt

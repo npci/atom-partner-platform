@@ -1,0 +1,196 @@
+# Copyright 2026 National Payments Corporation of India
+# SPDX-License-Identifier: MIT
+#
+# The UPI/NPCI domain pack.
+#
+# Every value here is the wording a UPI deployment expects in the prompts, the
+# role picker and the sign-off PDF. Setting DOMAIN_PACK to this file is what
+# makes a UPI install render UPI vocabulary; the source carries none of it.
+#
+# Domain content in a domain file is CORRECT here — the same reasoning that
+# pins `frontend/labels.upi.json`. This file naming UPI, VPA and IFSC is not
+# leakage; those terms appearing in `backend/app/agents/prompts/*.md` is.
+#
+# EXISTING DEPLOYMENTS MUST OPT IN. The default pack is `generic`, so an
+# upgrade without DOMAIN_PACK set changes wording. That mirrors how
+# LABEL_PROFILE already works on the frontend, and is the safer default: a
+# generic install that reads blandly is recoverable, a library network silently
+# emitting payments vocabulary is not.
+
+pack: upi
+
+prompt_blocks:
+  authority: NPCI
+  authority_cap: NPCI
+
+  partner_descriptor: a UPI ecosystem partner (a bank, PSP, or TPAP)
+  partner_employer: a bank / PSP that participates in the NPCI UPI ecosystem
+  reviewer_employer: a bank
+
+  domain_name: UPI
+  change_descriptor: a UPI feature change
+  artifact_kinds: BRD, technical spec, product deck, certification test cases
+
+  code_context: This is UPI payments code — the bar is high.
+
+  # Domain-specific fallbacks for the per-test-case data suggester. The FIELD
+  # NAMES it may use are derived from `roles:` below, so only the value-picking
+  # heuristics live here — they are pure payments knowledge and mean nothing in
+  # another domain.
+  test_data_guidance: |-
+    - Use the partner's known artifacts (IFSC, account prefixes, VPA handle) when
+      the change docs reveal them. If unknown, fall back to safe defaults:
+      - VPAs:   "test1@examplebank" (payer), "merchant@examplebank" (payee)
+      - IFSC:   "EXMP0000001"
+      - Amount: derive from scenario keywords
+         - "insufficient" / "low balance"      → "999999.00"
+         - "limit exceeded"                    → "200000.00"
+         - "partial capture" / "partial"       → "500.00"
+         - normal / success / deemed           → "100.00"
+      - currency: always "INR"
+      - account_type: "SAVINGS" unless scenario says current
+
+# Mirrors ROLE_FIELDS + the four <option>s in ChangeDetail.jsx. `case_prefix`
+# is the tc_id prefix the cert agent uses to select the cases a role must run.
+#
+# Placeholders use example handles rather than real institutions: the previous
+# values named State Bank of India (`test@sbi`, `SBIN0000001`). The UPI domain
+# does not require a real bank's name to be illustrative, and a third party's
+# identifiers do not belong in shipped defaults.
+roles:
+  - key: PAYER_PSP
+    label: Payer PSP
+    case_prefix: PR_
+    fields:
+      - key: payer_vpa
+        label: Payer VPA
+        placeholder: test@examplebank
+        required: true
+      - key: mobile_number
+        label: Mobile (optional)
+        placeholder: "9999900001"
+
+  - key: PAYEE_PSP
+    label: Payee PSP
+    case_prefix: PE_
+    fields:
+      - key: payee_vpa
+        label: Payee VPA
+        placeholder: merchant@examplebank
+        required: true
+      - key: merchant_category_code
+        label: MCC (P2M, optional)
+        placeholder: "5411"
+
+  - key: REMITTER_BANK
+    label: Remitter Bank
+    case_prefix: RE_
+    fields:
+      - key: account_number
+        label: Account #
+        placeholder: "12345678901"
+        required: true
+      - key: ifsc
+        label: IFSC
+        placeholder: EXMP0000001
+        required: true
+      - key: account_type
+        label: Account type
+        placeholder: SAVINGS
+
+  - key: BENEFICIARY_BANK
+    label: Beneficiary Bank
+    case_prefix: BE_
+    fields:
+      - key: account_number
+        label: Account #
+        placeholder: "98765432101"
+        required: true
+      - key: ifsc
+        label: IFSC
+        placeholder: EXMP0000002
+        required: true
+      - key: account_type
+        label: Account type
+        placeholder: SAVINGS
+
+signoff:
+  issuer: National Payments Corporation of India
+  programme: UPI Certification
+  signatory: NPCI Certification & Compliance Office
+  accent: "#1d4ed8"
+  # Short forms for the results table's 12mm "initiated by" column. These are
+  # the DISPLAY side of the pinned wire tokens NPCI and BANK, which keep their
+  # values on the wire regardless of what is printed here.
+  authority_short: NPCI
+  partner_short: BANK
+  # Place of issue in the attestation block. Was a bare literal in the PDF
+  # renderer until this pack carried it.
+  issued_at: Mumbai
+
+# Fallback certification profile, submitted when the operator has stored no
+# `cert_config`. These exact values were hardcoded in
+# `a2a_common/handlers/cert_lifecycle.py` and merged UNDER every submission, so
+# a library or telecom deployment transmitted an IFSC, an NBIN and a PSP handle
+# on its first certification handshake. They are correct HERE — this is the
+# payments pack — and a UPI deployment's submission is unchanged by the move.
+#
+# The KEYS are the A2A spec's `cert_config_submission` shape and are not ours to
+# rename; only the values are domain data. The flat keys below the nested ones
+# are deliberate: the certification rig keys participants on a 3-letter
+# `bank_code` and addresses runs to a `psp_org_id`, neither of which the spec's
+# `bank_identity` carries, so both shapes travel until that gap is reconciled.
+cert_profile:
+  renews_cflow_id: null
+  bank_identity:
+    bank_name: My Bank
+    org_id: MYORG1
+    nbin: null
+    ifsc: MYPS0000001
+    iin: null
+    participant_code: OLV101
+    handle: "@mypsp"
+    acquirer_id: null
+  network:
+    host: 127.0.0.1
+    port: 8443
+    base_url: null
+    egress_cidrs: []
+    mpls_circuit_id: null
+  # Certificate bodies are NEVER inline on this wire — A2A carries only
+  # `cert_ref` + `fingerprint_sha256`, uploaded out of band — so nulls are the
+  # honest value here, not placeholders to fill in.
+  security:
+    tls_tier: none
+    ssl_signer: null
+    ssl_client_cert: null
+    hsm_certificate: null
+  roles: [remitter, beneficiary]
+  supported_protocol_versions: ["UPI 2.x"]
+  supported_features: []
+  # The subset the PARTNER asks to certify against. Changing this one value
+  # changes what gets certified.
+  requested_subset: Subset-A2A-BIDI
+  contacts: []
+  preferred_window: null
+  bank_name: My Bank
+  bank_code: MYB
+  bank_org_id: MYORG1
+  bank_ifsc: MYPS0000001
+  psp_name: MyPSP
+  psp_org_id: OLV101
+  psp_code: MYB01
+  handler: mypsp
+  mpinlength: "6"
+  bank_server_ip: 127.0.0.1
+  bank_server_port: "8443"
+
+# Per-case values the partner owns, used when a case has no stored test data.
+# `ready` is the spec's execution gate: on an authority-initiated case, true
+# permits execution; on a partner-initiated one it is ignored.
+cert_case_data:
+  amount: "100.00"
+  mpin: "000012"
+  payerVpa: tester@mypsp
+  payeeVpa: tester2@mypsp
+  ready: true

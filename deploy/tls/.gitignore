@@ -1,0 +1,6 @@
+# TLS private key material for the edge proxy (Finding 16). Never commit
+# real certs/keys — this directory is populated by the operator per
+# DEPLOYMENT_GUIDE.md §3.1 (self-signed dev cert) or §10.2 (real cert).
+*.pem
+*.key
+*.crt

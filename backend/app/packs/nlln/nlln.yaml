@@ -1,0 +1,146 @@
+# Copyright 2026 National Payments Corporation of India
+# SPDX-License-Identifier: MIT
+#
+# National Library Lending Network — a real, non-payments domain.
+#
+# THIS PACK IS THE ACCEPTANCE TEST. A seam that only ever runs `generic` and
+# `upi` proves very little: `generic` is bland by construction and `upi` is the
+# domain the code already assumed. This one is structurally different — a
+# different authority, different roles, different identifiers, no money — so
+# wording that is still secretly payments-shaped shows up as nonsense rather
+# than as a slightly odd sentence.
+#
+# The vocabulary is NOT invented. It is taken from the NLLN wire contract
+# (`xsd/nlln-v1.xsd`, targetNamespace http://nlln.in/schema/v1): Member.handle,
+# Member.standing, Book.isbn, Book.shelfLocation, Loan.state, and the
+# ReqMemberVerify / ReqLoanReport / ReqLoanClose message set.
+#
+# PROVENANCE, because it matters for anyone trying to run this end to end:
+# `sut/nlln-app/` is NOT part of this repository — `git ls-files sut/` returns
+# nothing. What is on disk there is leftover build output from a code-agent run
+# (a `.lease`, a `.base_sha` and Maven `target/` jars); the Java source is not
+# present and a fresh clone has no `sut/` at all. This pack was authored from
+# the XSD inside `nlln-contract-1.0.0.jar`. It stands on its own as a domain
+# definition, but do not expect to point the platform at a checked-in SUT.
+
+pack: nlln
+
+prompt_blocks:
+  authority: the NLLC
+  authority_cap: The NLLC
+
+  partner_descriptor: a member library in the National Library Lending Network
+  partner_employer: a member library that participates in the National Library Lending Network
+  reviewer_employer: a member library
+
+  domain_name: the National Library Lending Network
+  change_descriptor: a lending-protocol change
+  artifact_kinds: rulebook amendment, schema revision, and certification test cases
+
+  # Deliberately NOT "the bar is high because this is payments code". The
+  # threat model here is member privacy and catalogue integrity, not funds
+  # movement, and a reviewer told otherwise hunts for the wrong bugs.
+  code_context: >-
+    This is inter-library lending code. It handles member records and loan
+    state, so member privacy and correct loan accounting are the primary
+    risks — the bar is high.
+
+  test_data_guidance: |-
+    - Use the library's own catalogue and member identifiers when the change
+      docs reveal them. If unknown, fall back to safe defaults:
+      - Member handle: "r.iyer@anna-library"
+      - ISBN:          "9780000000001"
+      - Loan period:   derive from scenario keywords
+         - "overdue"                  → a dueDate already in the past
+         - "renewal" / "extend"       → 14 days
+         - normal / success           → 21 days
+      - Member standing: "GOOD" unless the scenario says suspended
+      - Loan state: one of RESERVED / ISSUED / OVERDUE / RETURNED
+
+roles:
+  - key: LENDING_LIBRARY
+    label: Lending Library
+    case_prefix: LE_
+    fields:
+      - key: isbn
+        label: ISBN
+        placeholder: "9780000000001"
+        required: true
+      - key: shelf_location
+        label: Shelf location
+        placeholder: STACK-3-A
+      - key: org_id
+        label: Organisation ID
+        placeholder: anna-library
+        required: true
+
+  - key: BORROWING_LIBRARY
+    label: Borrowing Library
+    case_prefix: BO_
+    fields:
+      - key: member_handle
+        label: Member handle
+        placeholder: r.iyer@anna-library
+        required: true
+      - key: org_id
+        label: Organisation ID
+        placeholder: anna-library
+        required: true
+
+  - key: MEMBER_REGISTRY
+    label: Member Registry
+    case_prefix: ME_
+    fields:
+      - key: member_handle
+        label: Member handle
+        placeholder: r.iyer@anna-library
+        required: true
+      - key: max_loans
+        label: Loan ceiling
+        placeholder: "8"
+
+signoff:
+  issuer: National Library Lending Council
+  programme: NLLN Lending-Protocol Certification
+  signatory: NLLC Certification & Compliance Office
+  authority_short: NLLC
+  partner_short: LIBRARY
+  issued_at: Geneva
+  # Deep green. Chosen to be visibly not the UPI pack's blue, so a PDF
+  # generated under the wrong pack is obvious at a glance rather than
+  # differing only in wording buried in the body text.
+  accent: "#166534"
+
+# The same spec-shaped `cert_config_submission` keys, populated with library
+# vocabulary. This block is the acceptance test for the cert seam: if the
+# submission still has to carry an IFSC or an MPIN to be valid, the seam is not
+# real. Nested `bank_identity` keeps its spec name — the wire contract is not
+# ours to rename — but nothing inside it is payments-shaped.
+cert_profile:
+  renews_cflow_id: null
+  bank_identity:
+    bank_name: Anna Memorial Library
+    org_id: ANNA01
+    participant_code: NLLN-ANNA
+    handle: "@anna-library"
+  network:
+    host: 127.0.0.1
+    port: 8443
+    base_url: null
+    egress_cidrs: []
+  security:
+    tls_tier: none
+    ssl_signer: null
+    ssl_client_cert: null
+    hsm_certificate: null
+  roles: [lending, borrowing]
+  supported_protocol_versions: ["NLLN 1.x"]
+  supported_features: []
+  requested_subset: Subset-A2A-BIDI
+  contacts: []
+  preferred_window: null
+
+cert_case_data:
+  isbn: "9780000000001"
+  member_handle: r.iyer@anna-library
+  ready: true

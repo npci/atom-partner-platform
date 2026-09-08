@@ -1,0 +1,133 @@
+# Copyright 2026 National Payments Corporation of India
+# SPDX-License-Identifier: MIT
+#
+# Airworthiness Directive Compliance Network (ADCN) — the PARTNER-side pack.
+#
+# WHY THIS FILE EXISTS AT ALL, because the answer is not obvious and cost a
+# round to find. The authority platform ships its own ADCN pack at
+# `/nirbhay/atom/adcn-authority-app/domain-pack/adcn.yaml` and points
+# DOMAIN_PACK straight at it. Pointing THIS platform at that same file loads
+# without error and yields `roles: []`, because the two platforms read roles
+# from different places in the YAML:
+#
+#   authority schema :  cert_vocabulary.role_prefixes / role_labels /
+#                       role_test_data_fields   (three parallel maps)
+#   partner schema   :  a top-level `roles:` list of {key, label, case_prefix,
+#                       fields[]}                (see app/core/domain/pack.py)
+#
+# `adcn.yaml` has no top-level `roles:` key, so the partner's loader finds none
+# and reports zero. Nothing errors — the pack IS valid partner YAML, it simply
+# says nothing about roles. The symptom shows up two screens later as an empty
+# role picker and a readiness declaration that cannot be submitted, because
+# `role` is required when target status is ready_for_certification.
+#
+# So the vocabulary is TRANSCRIBED here into the partner schema rather than
+# shared by reference. Every value below is copied from the authority pack or
+# from kit v1 of change 8ebc2b48 — none of it is invented:
+#
+#   roles + case prefixes   authority pack cert_vocabulary.role_prefixes
+#                           (OPERATOR: OP_, MAINTENANCE_ORG: MO_)
+#   role labels             cert_vocabulary.role_labels
+#   role fields             cert_vocabulary.role_test_data_fields
+#   identifiers/placeholders  worked examples in the kit's tech_spec
+#                           (tailNumber="S2-AEP", operatorCode="OP-BGAIR-01",
+#                           adNumber="AD-2026-0114")
+#   authority naming        the kit's circular letterhead
+#
+# TRANSCRIPTION IS A LIABILITY, and it is recorded as one (F-31): the two files
+# can now drift, and nothing checks that they agree. Fixing it properly means
+# one schema read by both platforms, which is a cross-platform change neither
+# side can make alone.
+
+pack: adcn
+
+prompt_blocks:
+  authority: CAAB
+  authority_cap: CAAB
+
+  partner_descriptor: a certificated participant on the Airworthiness Directive Compliance Network
+  partner_employer: an organisation holding active participation on the Airworthiness Directive Compliance Network
+  reviewer_employer: a participating aviation organisation
+
+  domain_name: the Airworthiness Directive Compliance Network
+  change_descriptor: an airworthiness-directive compliance protocol change
+  artifact_kinds: circular, technical specification, XSD, and certification test cases
+
+  # The threat model is airworthiness data integrity and auditability, not
+  # funds movement. A reviewer told "this is payments code" hunts for the
+  # wrong class of bug — see the same reasoning in the nlln pack.
+  code_context: >-
+    This is airworthiness-directive compliance code. It carries per-airframe
+    compliance state that a civil aviation regulator audits, so record
+    integrity, correct state transitions and an accurate append-only progress
+    history are the primary risks — the bar is high.
+
+  test_data_guidance: |-
+    - Use identifiers from the change documents when they reveal them. If
+      unknown, fall back to the worked examples in the ADCN tech spec:
+      - Tail number:     "S2-AEP"        (also S2-AGV, S2-AHK)
+      - Operator code:   "OP-BGAIR-01"   (also OP-BD-007)
+      - AD number:       "AD-2026-0114"
+    - completionPct is an integer 0-100 on the wire, but the compliance
+      service rejects exactly 100 on a PARTIAL_UPDATE — use 0-99 for partial
+      progress and drive 100 through ReqComplianceClose/CERTIFY instead.
+      (This contradiction between the XSD and the service rule is filed as
+      F-30 item 5; revisit once the authority resolves it.)
+    - expectedCompletionDate must be a real ISO date (YYYY-MM-DD) and must not
+      be in the past.
+    - A downward revision of completionPct additionally requires a
+      RevisionReason from: PARTS_UNAVAILABLE, AIRCRAFT_OPERATIONAL_PRIORITY,
+      TECHNICAL_FINDING, DATA_ENTRY_CORRECTION, SCOPE_CHANGE_BY_AUTHORITY.
+
+# Transcribed from the authority pack's cert_vocabulary. Order matters only for
+# UI presentation. `case_prefix` must match the authority's role_prefixes
+# exactly — it is how the authority's orchestrator selects which certification
+# test cases belong to this partner's declared role.
+roles:
+  - key: MAINTENANCE_ORG
+    label: Maintenance Organisation
+    case_prefix: MO_
+    fields:
+      - key: ad_number
+        label: AD number
+        placeholder: "AD-2026-0114"
+        required: true
+      - key: maintenance_org_id
+        label: Maintenance organisation ID
+        placeholder: "MO-BGAIR-01"
+        required: true
+
+  - key: OPERATOR
+    label: Operator
+    case_prefix: OP_
+    fields:
+      - key: tail_number
+        label: Tail number
+        placeholder: "S2-AEP"
+        required: true
+      - key: operator_code
+        label: Operator code
+        placeholder: "OP-BGAIR-01"
+        required: true
+      - key: compliance_window_days
+        label: Compliance window (days)
+        placeholder: "30"
+
+signoff:
+  issuer: Civil Aviation Airworthiness Bureau
+  programme: ADCN Airworthiness-Directive Compliance Certification
+  signatory: CAAB Certification & Compliance Office
+  authority_short: CAAB
+  # "PARTICIPANT" is the circular's own word for this party but the loader
+  # rejects it: 56.2pt against a 52.4pt initiator column, and reportlab wraps
+  # rather than truncating, so it would print as stacked fragments.
+  partner_short: PARTNER
+  # Left empty deliberately. A place of issue is an assertion about where a
+  # signed document was executed and the kit does not state one, so the
+  # attestation omits the clause rather than naming a city nobody configured
+  # — same rule as the generic pack.
+  issued_at: ""
+  # Aviation slate-blue. Chosen to be visibly distinct from the upi pack's
+  # blue and the nlln pack's green, so a PDF generated under the wrong pack is
+  # obvious at a glance rather than differing only in body text.
+  accent: "#1e40af"

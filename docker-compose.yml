@@ -1,0 +1,352 @@
+# Standalone partner-platform stack — runs on its own, no authority monorepo needed.
+#   docker compose up -d
+# Brings up Postgres + the FastAPI backend + the React frontend. The seven
+# agents run in-process (negotiation is the only stub),
+# so a fresh clone produces output immediately (mock without an LLM key).
+# The platform is a CLIENT of a live authority instance over A2A — configure the
+# authority URL + authority-issued credentials from the Settings UI after first
+# login.
+#
+# Set DOMAIN_PACK to choose the deployment's vocabulary (roles, identifiers,
+# prompt wording, sign-off identity). Packs ship under backend/app/packs/;
+# unset defaults to `generic`, which names no industry.
+
+services:
+  partner_postgres:
+    # pgvector/pgvector:pg16 = stock Postgres 16 + the pgvector extension, used
+    # by the RAG vector store (document_chunks / embedding_cache). It is PG16, so
+    # the existing partner_pg_data volume migrates in place from postgres:16-alpine.
+    image: pgvector/pgvector:pg16
+    container_name: partner_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PARTNER_POSTGRES_USER:-partner_user}
+      POSTGRES_PASSWORD: ${PARTNER_POSTGRES_PASSWORD:-partner_password}
+      POSTGRES_DB: ${PARTNER_POSTGRES_DB:-partner_db}
+    volumes:
+      - partner_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PARTNER_POSTGRES_USER:-partner_user}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Embedding model server for the RAG vector foundation. nomic-embed-text is
+  # 768-dim and matches the vector(768) columns. The model is pulled on first
+  # use (a manual `docker exec partner_ollama ollama pull nomic-embed-text`, or
+  # the warmup call) — the named volume caches it across restarts.
+  ollama:
+    # Pinned. This was the only `:latest` in the tree, which meant a rebuild
+    # could silently change the embedding runtime under a corpus that had
+    # already been indexed — and left the one third-party image here with no
+    # reproducible version at all. Override with PARTNER_OLLAMA_IMAGE if you
+    # need a newer tag; bump this default deliberately.
+    image: ${PARTNER_OLLAMA_IMAGE:-ollama/ollama:0.5.7}
+    container_name: partner_ollama
+    restart: unless-stopped
+    volumes:
+      - partner_ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: partner_backend
+    restart: unless-stopped
+    depends_on:
+      partner_postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    volumes:
+      - partner_data:/app/data
+      # Capability profile (read-only). Ships the blank template; swap to
+      # ./data/examples/example_bank_profile.md for a worked (fictional)
+      # reference, or point at your own to load a real profile.
+      - ./data/partner_profile.template.md:/app/data/partner_profile.md:ro
+      # Agent manifest (read-only) — edit bindings/prompts without rebuilding.
+      - ./backend/config/agents.yaml:/app/config/agents.yaml:ro
+      # Domain packs (read-only). Same rationale as agents.yaml: the image
+      # BAKES `app/`, so a pack added to the repo after the last build is not
+      # in the container and DOMAIN_PACK pointing at it fails to load. Mounting
+      # the directory means a new or edited pack needs only a restart, not a
+      # rebuild — which matters because the pack is config, not code.
+      #
+      # Mounted as a directory rather than per-file so adding the NEXT pack
+      # does not require another compose edit.
+      - ./backend/app/packs:/app/app/packs:ro
+    environment:
+      DATABASE_URL: postgresql+psycopg://${PARTNER_POSTGRES_USER:-partner_user}:${PARTNER_POSTGRES_PASSWORD:-partner_password}@partner_postgres:5432/${PARTNER_POSTGRES_DB:-partner_db}
+      # Passed through explicitly because several security controls are keyed
+      # on it and NOTHING was setting it, so the shipped stack was permanently
+      # "development" (config.py defaults the field to that, so an unset
+      # variable reads as development rather than as unknown).
+      #
+      # What was inert as a result: the PARTNER_ALLOW_UNAUTHENTICATED_A2A
+      # refusal, the INTEGRATION_TESTING_ENABLED refusal, the fatal JWT/HMAC
+      # key-strength checks, and the docs_url/redoc_url/openapi_url
+      # suppression in main.py — so `/docs` was live on every compose
+      # deployment. Defaulted to development to keep `docker compose up`
+      # working unchanged; a real deployment sets APP_ENV=production and the
+      # guards above then apply.
+      APP_ENV: ${APP_ENV:-development}
+      # The integration-testing tunnel — the path a certification round's real
+      # traffic takes from the operator's rig to the authority's simulator.
+      #
+      # Passed through explicitly for the same reason APP_ENV above is: the
+      # variable existed in config.py and in `.env`, and NOTHING carried it into
+      # the container, so setting it achieved nothing and the tunnel answered
+      # every cert case with
+      #
+      #     503  X-Tunnel-Error: tunnel_disabled
+      #
+      # while the rig, the trigger and the SUT were all working. Same defect
+      # shape as F-14 (PARTNER_PUBLIC_URL never forwarded).
+      #
+      # DEVELOPMENT ONLY, and config.py enforces it: this mounts an
+      # UNAUTHENTICATED forwarding ingress at /integration-testing/{alias}/{path}
+      # that the A2A rate limiter does not cover. Setting it true with
+      # APP_ENV=staging|production is a startup error, deliberately. Leave it
+      # unset for any real deployment.
+      INTEGRATION_TESTING_ENABLED: ${INTEGRATION_TESTING_ENABLED:-false}
+      # One proxy in front: the `partner_edge` nginx, which sets
+      # X-Forwarded-For. Lets api/auth attribute a login failure to the real
+      # client instead of to the edge container — see the field's comment in
+      # config.py. Set to 0 if you front this service with nothing, or raise it
+      # if you add another proxy ahead of the edge; a WRONG value is read as
+      # "cannot attribute" and skips the IP tier, it does not trust a forged
+      # header.
+      PARTNER_TRUSTED_PROXY_HOPS: ${PARTNER_TRUSTED_PROXY_HOPS:-1}
+      PARTNER_NAME: ${PARTNER_NAME:-Partner Agent}
+      AGENTS_CONFIG: /app/config/agents.yaml
+      PARTNER_PROFILE_PATH: /app/data/partner_profile.md
+      # Domain vocabulary: roles, identifier fields, prompt wording and the
+      # sign-off PDF's identity. A PATH, not a key — an operator can mount a
+      # pack of their own anywhere and point at it.
+      #
+      # This MUST be forwarded explicitly. `backend/.env` never reaches the
+      # container (.dockerignore excludes it, and this service declares no
+      # env_file), so without this line `DOMAIN_PACK` is unset inside the
+      # container no matter what the operator puts in their .env — and the
+      # registry silently falls back to the generic pack. Every deployment
+      # would render neutral vocabulary while the operator believed they had
+      # selected a domain. Exactly the failure the SSRF block below documents.
+      DOMAIN_PACK: ${DOMAIN_PACK:-/app/app/packs/generic/generic.yaml}
+      # ── Authority target + the SSRF guard's escape hatch ─────────────────
+      # These were missing, which made the guard's own advice impossible to
+      # follow: `backend/.env` is excluded from the image by .dockerignore (on
+      # purpose — see its header), and this service declares no `env_file`, so
+      # NOTHING in backend/.env reaches the container. An operator pointing the
+      # platform at the authority's UAT got "resolves to a private or reserved
+      # IP address", set AUTHORITY_SSRF_ALLOWED_HOSTS in backend/.env exactly as
+      # the message and .env.example instruct, restarted, and hit the identical
+      # refusal — the value never arrived. Passed through explicitly, matching
+      # how every other setting in this block is wired.
+      #
+      # New name first, old name still honoured. The nested default is not
+      # decoration: config.py's AliasChoices makes pydantic accept either
+      # spelling, but that only helps once a value REACHES the container.
+      # Compose interpolation has no aliasing of its own, so leading with
+      # ${AUTHORITY_PLATFORM_URL:-...} alone would silently drop the setting for
+      # every operator whose existing .env still says NPCI_PLATFORM_URL — and
+      # pydantic would then quietly use its default instead of erroring.
+      AUTHORITY_PLATFORM_URL: ${AUTHORITY_PLATFORM_URL:-${NPCI_PLATFORM_URL:-http://host.docker.internal}}
+      AUTHORITY_SSRF_ALLOWED_HOSTS: ${AUTHORITY_SSRF_ALLOWED_HOSTS:-}
+      AUTHORITY_SSRF_ALLOW_PRIVATE_NETWORKS: ${AUTHORITY_SSRF_ALLOW_PRIVATE_NETWORKS:-false}
+      # ── What this platform advertises in its AgentCard ───────────────────
+      # Same omission as the SSRF block above, one field later, and with a
+      # worse presentation. `backend/.env` never reaches the container, this
+      # service declares no `env_file`, and this line was missing — so the six
+      # lines .env spends explaining that PARTNER_PUBLIC_URL "must be reachable
+      # FROM the authority" described a value that could not arrive. config.py
+      # then fell back to its own default and the card advertised a name only
+      # resolvable inside this compose project. The authority's DISCOVERY
+      # SUCCEEDS and only the subsequent JSON-RPC connect fails, which reads as
+      # "the partner is down" rather than as a bad advertisement — exactly the
+      # failure mode .env warns about, caused by the plumbing rather than by
+      # the operator.
+      #
+      # ORIGIN, not origin+path. partner_card.py appends `/a2a-rpc/rpc`, and
+      # the edge (deploy/edge.nginx.conf) serves `/a2a-rpc/` at the ROOT — the
+      # `/a2a-partner/` prefix is the SPA. Setting this to
+      # `https://host:8443/a2a-partner` therefore advertises
+      # `/a2a-partner/a2a-rpc/rpc`, which nginx hands to the frontend: a POST
+      # there returns 405 text/html from nginx, never reaching the backend.
+      # The default below is this stack's own edge as PUBLISHED on the host —
+      # the same port the `ports:` mapping opens, so it tracks an overridden
+      # PARTNER_EDGE_HTTPS_PORT. It is deliberately NOT a container name:
+      # `partner_edge` would resolve only for a caller already inside this
+      # compose project, which is precisely the class of value that produced
+      # this bug. No default can be correct for an authority on another host —
+      # that is what the .env line is for — but a wrong default should at least
+      # be wrong in a way the operator can see from their own browser.
+      PARTNER_PUBLIC_URL: ${PARTNER_PUBLIC_URL:-https://localhost:${PARTNER_EDGE_HTTPS_PORT:-8443}}
+      # config.py refuses to boot on an http:// URL unless this is set. The
+      # compose defaults above (host.docker.internal, ollama, partner_backend)
+      # are all cleartext, so a stock `docker compose up` needs it to start at
+      # all. Any deployment carrying real credentials must use https:// and
+      # leave this unset.
+      PARTNER_ALLOW_HTTP: ${PARTNER_ALLOW_HTTP:-true}
+      # First-boot admin credentials. seed_admin() (backend/app/api/auth.py)
+      # refuses to create the initial user without ADMIN_PASSWORD in the
+      # process environment — the field IS in .env.example but was never
+      # forwarded here, so a fresh `docker compose up` crashed the backend
+      # with "ADMIN_PASSWORD environment variable is not set" until the
+      # operator hand-added it. No literal fallback for the password: an
+      # empty value is treated as "not set" and still raises, matching the
+      # SESSION_JWT_SECRET / PARTNER_SECRET_KEK pattern below.
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Session JWT signing key. Passed through with NO literal fallback, on
+      # purpose: config.py defaults `session_jwt_secret` to "" precisely so the
+      # emptiness check can refuse to boot production on an unset secret. A
+      # non-empty placeholder such as the old CHANGE_ME_INSECURE_DEFAULT made
+      # that check pass and let production run on a value published in this
+      # repo — anyone could then forge an admin session token.
+      #
+      # Unset now behaves exactly as the application intends: dev still starts
+      # (with the loud warning config.py already emits) and production raises.
+      # Mirrors docker-compose.yml at the authority side, which is fail-closed.
+      SESSION_JWT_SECRET: ${SESSION_JWT_SECRET:-}
+      # Secrets-at-rest encryption key.
+      # Same no-literal-fallback reasoning as SESSION_JWT_SECRET above — required
+      # before any secret (NPCI JWT/HMAC secrets, LLM key, GitLab token) can be
+      # saved via Settings; core/secret_box.py raises a clear error if unset.
+      PARTNER_SECRET_KEK: ${PARTNER_SECRET_KEK:-}
+      # LLM is optional — feasibility returns mock output when no key is set.
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      PARTNER_ANTHROPIC_API_KEY: ${PARTNER_ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
+      PARTNER_OPENAI_API_KEY: ${PARTNER_OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      PARTNER_AINXT_API_KEY: ${PARTNER_AINXT_API_KEY:-}
+      AINXT_BASE_URL: ${AINXT_BASE_URL:-}
+      AINXT_MODEL: ${AINXT_MODEL:-gpt-4o}
+      AINXT_COMPAT_MODE: ${AINXT_COMPAT_MODE:-openai}
+      AINXT_MESSAGES_MODEL: ${AINXT_MESSAGES_MODEL:-claude-sonnet-4-6}
+      # Only needed if an agent in agents.yaml uses a remote `url:` binding.
+      AGENT_SERVICE_TOKEN: ${AGENT_SERVICE_TOKEN:-}
+      # RAG embeddings (Phase 3). Ollama serves nomic-embed-text (768-dim) into
+      # the pgvector store. Defaults are wired for the in-compose service.
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      EMBED_MODEL: ${EMBED_MODEL:-nomic-embed-text}
+      EMBED_DIM: ${EMBED_DIM:-768}
+    # NOT published to the host (zero trust, runtime hardening). Reachable only
+    # from `edge` and `frontend` on the compose network — TLS is terminated at
+    # `edge` before any traffic reaches this container. The rationale: the
+    # previous `ports: ["8011:8001"]` meant both the operator UI login and
+    # the NPCI-facing A2A endpoint were reachable in cleartext directly on
+    # the host, bypassing every nginx-tier control.
+    expose:
+      - "8001"
+    # The certification network, joined so the two legs of a cert run can find
+    # each other. BOTH directions are needed and each was broken:
+    #
+    #   outbound  partner -> rig   `cert_trigger_url` = http://adcn_cert_rig:8091/trigger
+    #   inbound   rig -> partner   the rig's PARTNER_TUNNEL_BASE, which names
+    #                              `atom_partner_backend:8001` — hence the alias
+    #                              below, since this container is `partner_backend`.
+    #
+    # Without this the authority's `cert_execution_start` arrives, the handler
+    # finds no reachable trigger, and the round parks on `awaiting_partner`
+    # with every case unreported. Nothing errors; the run simply never finishes.
+    #
+    # `external: true` deliberately (see the `networks:` block at the foot of
+    # this file): the network is not ours to own — the authority's containers
+    # sit on it too.
+    networks:
+      default: {}
+      cert_net:
+        aliases:
+          # The name the rig's PARTNER_TUNNEL_BASE resolves. Do not rename
+          # without changing the rig's environment to match.
+          - atom_partner_backend
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Hosts the UI is permitted to emit outbound links to. Vite inlines
+        # this at BUILD time, so it must be a build arg — setting it in the
+        # container environment has no effect on an already-built bundle.
+        #
+        # safeUrl.js rebuilds every href from this allowlist (DOM XSS and open
+        # redirect). A host that is not listed degrades to '#',
+        # so leaving this unset makes GitLab merge-request links inert. Set it
+        # to your GitLab host in a root .env:  SAFE_REDIRECT_HOSTS=gitlab.example.com
+        VITE_SAFE_REDIRECT_HOSTS: ${SAFE_REDIRECT_HOSTS:-}
+        # GitLab origin the UI uses to BUILD merge-request links itself.
+        #
+        # The API no longer sends a ready-made MR URL — static analysis traced that
+        # value from the response into an <a href> under three queries. The
+        # backend sends {project_path, mr_iid} and the browser assembles the
+        # link against this origin, so no response string reaches an href.
+        #
+        # Also a build arg (Vite inlines it at compile time). Leave it unset and
+        # MR references render as plain text instead of links:
+        #   GITLAB_BASE_URL=https://gitlab.example.com
+        VITE_GITLAB_BASE_URL: ${GITLAB_BASE_URL:-}
+    container_name: partner_frontend
+    restart: unless-stopped
+    # NOT published to the host — served through `edge` (TLS termination),
+    # same reasoning as `backend` above.
+    expose:
+      - "80"
+    depends_on:
+      - backend
+
+  # TLS-terminating edge proxy — zero trust, runtime hardening.
+  # Fronts both `frontend` and `backend` so the DOCUMENTED
+  # default `docker compose up -d` path is TLS-by-default, not an opt-in
+  # appendix. See deploy/edge.nginx.conf and DEPLOYMENT_GUIDE.md §3.1/§10.2
+  # for the operator-facing cert-provisioning step.
+  edge:
+    image: nginx:1.27-alpine
+    container_name: partner_edge
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "${PARTNER_EDGE_HTTPS_PORT:-8443}:443"
+      - "${PARTNER_EDGE_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./deploy/edge.nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/tls:/etc/nginx/tls:ro   # operator-supplied cert.pem / key.pem — see DEPLOYMENT_GUIDE.md §3.1
+
+volumes:
+  partner_data:
+  partner_pg_data:
+  partner_ollama_data:
+
+networks:
+  # Implicit default network for this project, named so the `backend` service
+  # can list it alongside `cert_net` (naming one network in a service means
+  # naming them all).
+  default:
+
+  # The certification network the operator's rig sits on.
+  #
+  # `external: true` — this stack must NOT create or own it. The network is
+  # shared with the authority's containers, and adopting it here would put its
+  # lifecycle behind `docker compose down` on this project.
+  #
+  # NOTE FOR OPERATORS: adcn-operator-app/docker-compose.yml states that this
+  # network is "Created by the partner platform's stack". That is not true and
+  # was not true when written — this file created no networks at all, and
+  # `docker network inspect certagent_cert-net` shows no compose labels, i.e.
+  # it was made by hand with `docker network create`. Until one stack takes
+  # ownership deliberately, create it before first start:
+  #
+  #     docker network create certagent_cert-net
+  #
+  # See DEPLOYMENT_GUIDE.md §10.3.
+  cert_net:
+    external: true
+    name: certagent_cert-net
