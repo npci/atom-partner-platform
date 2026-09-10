@@ -5,7 +5,7 @@
 #
 # WHY THIS FILE EXISTS AT ALL, because the answer is not obvious and cost a
 # round to find. The authority platform ships its own ADCN pack at
-# `/nirbhay/atom/adcn-authority-app/domain-pack/adcn.yaml` and points
+# `/user/atom/adcn-authority-app/domain-pack/adcn.yaml` and points
 # DOMAIN_PACK straight at it. Pointing THIS platform at that same file loads
 # without error and yields `roles: []`, because the two platforms read roles
 # from different places in the YAML:

@@ -149,7 +149,7 @@ Three traps, all of which produce a *silent* wrong answer rather than an error:
    `environment:` entry, so changing it needs
    `docker compose up -d backend`. A plain restart keeps the old value.
 3. **Do not point this at another platform's pack.** The authority ships an
-   ADCN pack at `/nirbhay/atom/adcn-authority-app/domain-pack/adcn.yaml`.
+   ADCN pack at `/user/atom/adcn-authority-app/domain-pack/adcn.yaml`.
    Pointing `DOMAIN_PACK` at it **loads without error and yields zero roles**,
    because the two platforms express roles in different YAML shapes — this
    platform wants a top-level `roles:` list, the authority uses

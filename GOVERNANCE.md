@@ -72,7 +72,7 @@ Current maintainers:
 
 | Name | Handle | Areas |
 |---|---|---|
-| unifiedagentnxt-admin | [@unifiedagentnxt-admin](https://github.com/unifiedagentnxt-admin) | Overall; A2A contract, agent framework |
+| atom-admin | opensource[@]npci.org.in | Overall; A2A contract, agent framework |
 
 `unifiedagentnxt-admin` is a shared maintainer identity operated by the team
 behind both platforms, not an individual. Mail reaches the same inbox as the
