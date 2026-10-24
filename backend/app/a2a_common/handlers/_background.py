@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Background workers fired after an inbound `change_communication`.
 
 WS11 — replaces the old `threading.Thread(daemon=True)` workers. Work is now
@@ -30,27 +27,13 @@ def _guard(fn, *args) -> None:
         logger.exception("background worker %s failed", getattr(fn, "__name__", fn))
 
 
-async def _guard_async(fn, *args) -> None:
-    try:
-        await fn(*args)
-    except Exception:  # noqa: BLE001
-        logger.exception("background worker %s failed", getattr(fn, "__name__", fn))
-
-
 def _spawn(fn, *args) -> None:
-    """Schedule a background worker without a raw daemon thread.
+    """Schedule a blocking worker without a raw daemon thread.
 
-    On the event loop (the inbound A2A path): a SYNC worker runs via
-    `asyncio.to_thread` — its blocking DB / httpx / LLM work belongs off the
-    loop; a COROUTINE FUNCTION is scheduled on the loop directly (ITA-3),
-    which is what lets a worker await the async A2A sender natively. The sync
-    workers still send fine: `authority_client._run_portably` detects their
-    `to_thread` context (no loop affiliation, per-call client) and runs the
-    sender in isolation there.
-
-    With no running loop (e.g. a direct unit-test call), skip it — tests
-    invoke the worker explicitly when they want to exercise it. Logged at
-    WARNING because outside tests a missing loop means the auto-ack /
+    On the event loop (the inbound A2A path), run it via `asyncio.to_thread`
+    and track the task. With no running loop (e.g. a direct unit-test call),
+    skip it — tests invoke the worker explicitly when they want to exercise it.
+    Logged at WARNING because outside tests a missing loop means the auto-ack /
     cert-status / feasibility step was dropped silently — worth surfacing.
     """
     try:
@@ -61,16 +44,31 @@ def _spawn(fn, *args) -> None:
             getattr(fn, "__name__", fn),
         )
         return
-    if asyncio.iscoroutinefunction(fn):
-        task = loop.create_task(_guard_async(fn, *args))
-    else:
-        task = loop.create_task(asyncio.to_thread(_guard, fn, *args))
+    task = loop.create_task(asyncio.to_thread(_guard, fn, *args))
     _bg_tasks.add(task)
     task.add_done_callback(_bg_tasks.discard)
 
 
+def _send_verdict_acceptance(npci_change_id: str, case_ids: list[str], cflow_id: str | None = None) -> None:
+    """One cert_verdict_acceptance naming every accepted case, on its own DB session."""
+    from app import npci_client
+    from app.database import SessionLocal
+
+    with SessionLocal() as db:
+        npci_client.send_cert_verdict_acceptance(
+            db, npci_change_id, case_ids=case_ids, cflow_id=cflow_id,
+            note="Verdict accepted; the bank will fix and retest.")
+
+
+def schedule_verdict_acceptance(npci_change_id: str, case_ids: list[str], cflow_id: str | None = None) -> None:
+    """NPCI records an acceptance from the cert_verdict_acceptance TASK, not from the reply
+    to the verdict, so the bank has to send it."""
+    if npci_change_id and case_ids:
+        _spawn(_send_verdict_acceptance, npci_change_id, list(case_ids), cflow_id)
+
+
 def schedule_post_receive(
-    authority_change_id: str,
+    npci_change_id: str,
     local_change_id: str,
     kit_id: str | None,
     version_received: int,
@@ -88,13 +86,13 @@ def schedule_post_receive(
     (cert_status_update deployed/tested/ready_for_certification) starts when the
     partner actually progresses toward certification."""
     _spawn(
-        _auto_ack, authority_change_id, local_change_id, kit_id,
+        _auto_ack, npci_change_id, local_change_id, kit_id,
         version_received, in_response_to, kit_files_received,
     )
     _spawn(_auto_feasibility, local_change_id)
 
 
-def _auto_cert_status(authority_change_id: str, local_change_id: str, status: str) -> None:
+def _auto_cert_status(npci_change_id: str, local_change_id: str, status: str) -> None:
     """Auto-emit CERT_STATUS_UPDATE. Stamps cert_status_history with the
     transition timestamp on the local row regardless of A2A success — the
     partner UI needs the timestamp even if the wire is temporarily broken."""
@@ -102,7 +100,7 @@ def _auto_cert_status(authority_change_id: str, local_change_id: str, status: st
     from datetime import datetime, timezone
 
     from app.database import SessionLocal
-    from app.authority_client import send_cert_status_update
+    from app.npci_client import send_cert_status_update
 
     bg_db = SessionLocal()
     try:
@@ -119,10 +117,10 @@ def _auto_cert_status(authority_change_id: str, local_change_id: str, status: st
             row.cert_status_history = _json.dumps(history)
             bg_db.commit()
         try:
-            send_cert_status_update(bg_db, authority_change_id, status)
+            send_cert_status_update(bg_db, npci_change_id, status)
             logger.info(
                 "Auto cert_status_update sent: change=%s status=%s",
-                authority_change_id, status,
+                npci_change_id, status,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Auto cert_status_update failed (local row updated anyway)", exc_info=True)
@@ -131,7 +129,7 @@ def _auto_cert_status(authority_change_id: str, local_change_id: str, status: st
 
 
 def _auto_ack(
-    authority_change_id: str,
+    npci_change_id: str,
     local_change_id: str,
     kit_id: str | None,
     version_received: int,
@@ -141,12 +139,12 @@ def _auto_ack(
     """Auto-emit PROPOSAL_ACKNOWLEDGED and flip decision='acknowledged' on
     success. Opens a fresh session; all failures caught and logged."""
     from app.database import SessionLocal
-    from app.authority_client import send_proposal_acknowledged
+    from app.npci_client import send_proposal_acknowledged
 
     bg_db = SessionLocal()
     try:
         result = send_proposal_acknowledged(
-            bg_db, authority_change_id, kit_id, version_received,
+            bg_db, npci_change_id, kit_id, version_received,
             in_response_to, kit_files_received,
         )
         if result:
@@ -182,7 +180,7 @@ def _auto_feasibility(local_change_id: str) -> None:
 
     from app.agents import registry
     from app.database import SessionLocal
-    from app.models import ChangeDocument, FeasibilityReport
+    from app.models import ChangeDocument, FeasibilityReport, PartnerSetting
 
     db = SessionLocal()
     try:
@@ -193,15 +191,12 @@ def _auto_feasibility(local_change_id: str) -> None:
             )
             return
 
-        # Resolve by ACTIVE PROVIDER, not by a literal key name. This looked up
-        # `partner_anthropic_api_key` unconditionally, so an OpenAI- or
-        # gateway-configured deployment got None here and the auto-feasibility
-        # run on every inbound change silently produced mock output. It also read
-        # `.value` undecrypted, handing `enc:v1:...` on to the agent as if it
-        # were a credential. `resolve_runtime_api_key` does both correctly.
-        from app.core.llm import resolve_runtime_api_key
-
-        api_key = resolve_runtime_api_key(db)
+        api_key_row = db.execute(
+            select(PartnerSetting).where(
+                PartnerSetting.key == "partner_anthropic_api_key"
+            )
+        ).scalar_one_or_none()
+        api_key = api_key_row.value if api_key_row and api_key_row.value else None
 
         # Version-aware context: v1 baseline + LLM summary of later-version
         # changes (option C), instead of every revision the partner holds.

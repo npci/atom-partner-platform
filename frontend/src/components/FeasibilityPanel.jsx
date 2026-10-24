@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // FeasibilityPanel — renders the analyser's per-area assessment for an
 // incoming change. Sits above the tab bar on ChangeDetail so the
 // partner ops user sees the verdict before drilling into documents.
@@ -13,7 +10,6 @@
 //   - "Re-run" button POSTs to /analyse/{id} and refreshes.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { t } from '../strings'
 import {
   AlertTriangle, BadgeCheck, Brain, CheckSquare, ChevronDown, ChevronRight, ChevronUp,
   Clock, Copy, Loader2, MessageSquare, RefreshCw, Send,
@@ -72,10 +68,10 @@ const POSTURE_COLOURS = {
   out_of_scope:            { bg: 'rgba(15,23,42,0.06)',   fg: T.textMuted, border: T.borderSubtle,        label: 'Out of scope' },
 };
 
-// Single neutral tone for every drafted authority message. The partner no longer
-// pre-classifies messages as query vs counter — the authority handles them all through
+// Single neutral tone for every drafted NPCI message. The partner no longer
+// pre-classifies messages as query vs counter — NPCI handles them all through
 // one channel — so there is one look and one send path (/query).
-const MSG_TONE = { bg: 'rgba(37,99,235,0.10)', fg: T.primary, border: 'rgba(37,99,235,0.22)', label: `To ${t('term.authority')}` };
+const MSG_TONE = { bg: 'rgba(37,99,235,0.10)', fg: T.primary, border: 'rgba(37,99,235,0.22)', label: 'To NPCI' };
 
 // ── "Already sent" persistence ──────────────────────────────────────────────
 //
@@ -138,19 +134,19 @@ function Pill({ tone, children }) {
 }
 
 
-// Single drafted authority message — used inside an area card AND in the
-// top-level authority summary card. Two action buttons:
+// Single drafted NPCI message — used inside an area card AND in the
+// top-level NPCI summary card. Two action buttons:
 //
 //   - Copy   — puts "Subject: ...\n\nBody..." on clipboard. Useful when
 //              the partner wants to edit before sending.
 //   - Send   — POST /api/changes/{id}/query. Every partner message goes
-//              through the one query channel; the authority handles clarifications and
+//              through the one query channel; NPCI handles clarifications and
 //              term-change requests via the same pipeline, so there is no
 //              query-vs-counter routing on the partner side.
 function NpciMessageCard({ msg, sourceArea, changeId, onSent, collapsedByDefault = false }) {
   const tone = MSG_TONE;
   const [copied, setCopied] = useState(false);
-  // Body collapsed-state — true when used inside the top-level authority summary
+  // Body collapsed-state — true when used inside the top-level NPCI summary
   // (long list, partner skims subjects then drills in). False inside an
   // already-expanded area card (partner already chose to dig there).
   const [bodyOpen, setBodyOpen] = useState(!collapsedByDefault);
@@ -191,7 +187,7 @@ function NpciMessageCard({ msg, sourceArea, changeId, onSent, collapsedByDefault
     }
   };
 
-  const sendLabel = `Send to ${t('term.authority')}`;
+  const sendLabel = 'Send to NPCI';
   const sendBusy = sendState === 'sending';
   const sendDone = sendState === 'sent';
   const sendErr  = sendState === 'error';
@@ -232,7 +228,7 @@ function NpciMessageCard({ msg, sourceArea, changeId, onSent, collapsedByDefault
         <button
           onClick={onSend}
           disabled={sendBusy || sendDone}
-          title={`Send this message to ${t('term.authority')} — opens a thread on the change`}
+          title="Send this message to NPCI — opens a thread on the change"
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
             padding: '3px 9px', fontSize: 10.5, fontWeight: 700,
@@ -339,7 +335,7 @@ function SummaryCardHeader({ icon, label, count, accent, open, onToggle, hasBody
 
 // Top-of-panel "Internal work" card — partner's own to-do list aggregated
 // across all 6 areas. Sits above the area grid. Header is collapsible so
-// the user can hide the list when focused on authority communications.
+// the user can hide the list when focused on NPCI communications.
 function InternalSummaryCard({ items }) {
   const hasItems = items && items.length > 0;
   const [open, setOpen] = useState(true);
@@ -381,7 +377,7 @@ function InternalSummaryCard({ items }) {
 }
 
 
-// Top-of-panel "Discuss with the authority" card — flat list of drafted messages
+// Top-of-panel "Discuss with NPCI" card — flat list of drafted messages
 // across all areas, each with subject + body + copy / send buttons. Header
 // is collapsible so the user can hide the list when focused on internal work.
 function NpciSummaryCard({ items, changeId, onSent }) {
@@ -400,7 +396,7 @@ function NpciSummaryCard({ items, changeId, onSent }) {
     }}>
       <SummaryCardHeader
         icon={<MessageSquare size={15} color={T.primary} />}
-        label={`Discuss with ${t('term.authority')}`}
+        label="Discuss with NPCI"
         count={hasItems ? items.length : null}
         accent={accent}
         open={open}
@@ -409,10 +405,7 @@ function NpciSummaryCard({ items, changeId, onSent }) {
       />
       {!hasItems && (
         <div style={{ fontSize: 12, color: T.textMuted, marginTop: 6 }}>
-          {/* "No {label} communication" renders "No the Authority
-              communication" — `term.authority` carries its own article.
-              Rephrased so it reads for both that and a proper noun. */}
-          No communication with {t('term.authority')} needed — all terms acceptable as-is.
+          No NPCI communication needed — all terms acceptable as-is.
         </div>
       )}
       {hasItems && open && (
@@ -438,7 +431,7 @@ function AreaCard({ area, changeId, onSent }) {
   const meta = AREA_META[area.area] || { label: area.area };
   const tone = STATUS_COLOURS[area.status] || STATUS_COLOURS.unknown;
   const internal = area.internal_actions || [];
-  const npci = area.authority_communications || [];
+  const npci = area.npci_communications || [];
   const [open, setOpen] = useState(false);
   const hasDetail = (area.findings?.length || 0) + internal.length + npci.length > 0;
 
@@ -491,13 +484,13 @@ function AreaCard({ area, changeId, onSent }) {
               border: '1px solid rgba(37,99,235,0.18)',
             }}>
               <Send size={10} />
-              {npci.length} to {t('term.authority')}
+              {npci.length} to NPCI
             </span>
           )}
         </div>
       )}
 
-      {/* Expandable detail — findings + internal actions + the authority messages */}
+      {/* Expandable detail — findings + internal actions + NPCI messages */}
       {hasDetail && (
         <>
           <button
@@ -541,7 +534,7 @@ function AreaCard({ area, changeId, onSent }) {
                   <div style={{
                     fontSize: 10, fontWeight: 700, color: T.primary,
                     textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 6,
-                  }}>Discuss with {t('term.authority')}</div>
+                  }}>Discuss with NPCI</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                     {npci.map((m, i) => (
                       <NpciMessageCard key={i} msg={m} changeId={changeId} onSent={onSent} />
@@ -686,7 +679,7 @@ export default function FeasibilityPanel({ changeId, onMessageSent, decision }) 
       </div>
 
       {/* TWO TOP-LEVEL ACTION CARDS — the primary read for partner ops.
-          Left: internal-only work. Right: drafted messages for {t('term.authority')}.
+          Left: internal-only work. Right: drafted messages for NPCI.
           Stacks vertically on narrow screens. `alignItems: start` so the
           shorter card doesn't stretch to match the taller one — avoids
           the awkward whitespace when content volumes differ significantly. */}
@@ -698,7 +691,7 @@ export default function FeasibilityPanel({ changeId, onMessageSent, decision }) 
       }}>
         <InternalSummaryCard items={report.internal_action_summary} />
         <NpciSummaryCard
-          items={report.authority_communication_summary}
+          items={report.npci_communication_summary}
           changeId={changeId}
           onSent={onMessageSent}
         />

@@ -1,10 +1,6 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Authentication endpoints and JWT helpers."""
 import hashlib
 import logging
-import os
 import re
 import secrets
 import threading
@@ -13,9 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-import jwt
-from jwt import PyJWTError
-from pydantic import BaseModel, Field
+from jose import JWTError, jwt
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,30 +19,15 @@ from app.database import get_db
 from app.models import PartnerUser
 
 # Standard password policy — ≥8 chars + ≥1 letter + ≥1 digit. Mirrors
-# the authority backend so partner operators see identical validation
+# the NPCI backend so partner operators see identical validation
 # messages whichever side they sign up on.
 _HAS_LETTER = re.compile(r"[A-Za-z]")
 _HAS_DIGIT  = re.compile(r"\d")
 
 
-# bcrypt hashes at most 72 BYTES and silently ignores the rest, so anything
-# past that is not part of the credential no matter what the user believes.
-# Capping here rather than letting bcrypt truncate also bounds the work an
-# unauthenticated caller can ask for: hashing is deliberately slow, and
-# `verify_password` runs before any lockout tier can reject a huge body.
-_MAX_PASSWORD_BYTES = 72
-
-
 def _validate_new_password(pw: str) -> None:
     if len(pw) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
-    if len(pw.encode("utf-8")) > _MAX_PASSWORD_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Password must be at most {_MAX_PASSWORD_BYTES} bytes "
-                   "(bcrypt ignores anything beyond that, so a longer one "
-                   "would not be fully checked at login)",
-        )
     if not _HAS_LETTER.search(pw):
         raise HTTPException(status_code=422, detail="Password must contain at least one letter")
     if not _HAS_DIGIT.search(pw):
@@ -58,8 +38,8 @@ logger = logging.getLogger(__name__)
 # Local login-session signing key. Sourced from config/env (SESSION_JWT_SECRET),
 # NOT hardcoded — a per-deployment secret keeps sessions from being forgeable
 # across installs. We warn loudly when it's left at the insecure placeholder so
-# operators don't ship the default. (Distinct from the authority-issued
-# `authority_jwt_secret` used to validate inbound A2A calls.)
+# operators don't ship the default. (Distinct from the NPCI-issued
+# `npci_jwt_secret` used to validate inbound A2A calls.)
 JWT_SECRET = settings.session_jwt_secret
 # Insecure-default warning is now emitted by config.py (which also blocks
 # production startup entirely). No duplicate warning here.
@@ -96,12 +76,9 @@ def _set_session_cookie(response: Response, token: str) -> None:
         value=token,
         max_age=JWT_EXPIRY_HOURS * 3600,
         httponly=True,
-        # Secure flag is always set (SAST finding F-006). The session token
-        # must never be transmitted over unencrypted HTTP. Development
-        # environments that serve over plain HTTP should use a local TLS
-        # proxy (e.g. mkcert + Caddy or nginx with a self-signed cert)
-        # rather than disabling this flag.
-        secure=True,
+        # Secure only in production — the dev stack serves plain HTTP, where a
+        # Secure cookie would never be sent back.
+        secure=(settings.app_env == "production"),
         samesite="lax",
         path="/",
     )
@@ -127,7 +104,7 @@ def revoke_token(raw_token: str) -> None:
     try:
         payload = jwt.decode(raw_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         exp = payload.get("exp", 0)
-    except PyJWTError:
+    except JWTError:
         # Token already invalid — nothing to revoke
         return
     with _denylist_lock:
@@ -159,85 +136,18 @@ _LOCKOUT_TIER_1 = (5, 60)       # 5 failures → 60s lockout
 _LOCKOUT_TIER_2 = (10, 300)     # 10 failures → 5min lockout
 
 
-def _client_ip(request: Request) -> str | None:
-    """The client address to key the IP lockout tier on, or None if unknowable.
-
-    `request.client.host` is the immediate TCP peer. Behind the shipped edge
-    that is the nginx CONTAINER, identical for every user on the platform — so
-    keying a lockout on it put all operators in one bucket, and ten failed
-    logins from anyone locked out everybody. Because `_check_lockout` runs
-    before `verify_password`, a legitimate user could not clear it either: the
-    429 fires first and `_clear_failures` is never reached. One unauthenticated
-    request every ~5 minutes sustained it indefinitely.
-
-    So the address is only trusted when the deployment says how many proxies
-    sit in front (`PARTNER_TRUSTED_PROXY_HOPS`), and returning None is a real
-    answer: the caller SKIPS the IP tier rather than collapsing everyone into a
-    shared key. A shared-bucket IP lockout is strictly worse than none — it
-    stops no attacker who can vary usernames, and it hands any anonymous
-    caller a platform-wide denial of service. The per-username tier is
-    unaffected and still does the work brute-force protection is actually for.
-    """
-    peer = request.client.host if request.client else None
-    hops = max(0, int(getattr(settings, "partner_trusted_proxy_hops", 0) or 0))
-    if hops == 0:
-        # Direct exposure: the peer IS the client.
-        return peer
-    forwarded = request.headers.get("x-forwarded-for", "")
-    chain = [p.strip() for p in forwarded.split(",") if p.strip()]
-    if len(chain) < hops:
-        # Behind a proxy that did not set (enough of) the header — the request
-        # may have bypassed the edge entirely, as the loopback publish in
-        # docker-compose.override.yml allows. Refuse to guess.
-        return None
-    # Count from the RIGHT: the rightmost `hops` entries were appended by our
-    # own proxies, so the one just inside them is the furthest address we can
-    # still vouch for. Anything further left is client-supplied and forgeable.
-    return chain[-hops]
-
-
 def _check_lockout(key: str) -> None:
-    """Raise 429 if the key is currently locked out.
-
-    Emits a structured `login_lockout_triggered` security event on the way out.
-    The lockout itself has always worked; what was missing was the ALERT — a
-    brute-force attempt in progress was visible only as an HTTP 429 in an
-    access log, with nothing a
-    SIEM rule or log-based metric could fire on.
-    """
+    """Raise 429 if the key is currently locked out."""
     with _failures_lock:
         entry = _login_failures.get(key)
         if not entry:
             return
         count, last_fail = entry
         now = time.time()
-        locked_for: str | None = None
         if count >= _LOCKOUT_TIER_2[0] and (now - last_fail) < _LOCKOUT_TIER_2[1]:
-            locked_for = "5 minutes"
-        elif count >= _LOCKOUT_TIER_1[0] and (now - last_fail) < _LOCKOUT_TIER_1[1]:
-            locked_for = "60 seconds"
-
-    # Emit and raise OUTSIDE the lock — `emit_security_event` does formatting
-    # and logging I/O, and holding a contended lock across it would serialise
-    # every concurrent login attempt behind the logging subsystem.
-    if locked_for is None:
-        return
-
-    from app.core.security_events import emit_security_event
-    emit_security_event(
-        event_name="login_lockout_triggered",
-        severity="medium",
-        boundary="dashboard_login",
-        decision="rejected",
-        # `key` is a username or a client IP — deliberately NOT logged, to keep
-        # credentials and PII out of the event stream. The failure count is the
-        # actionable signal; the identity lives in the auth audit trail.
-        reason_code=f"consecutive_failures={count}",
-    )
-    raise HTTPException(
-        status_code=429,
-        detail=f"Too many failed attempts. Try again in {locked_for}.",
-    )
+            raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 5 minutes.")
+        if count >= _LOCKOUT_TIER_1[0] and (now - last_fail) < _LOCKOUT_TIER_1[1]:
+            raise HTTPException(status_code=429, detail="Too many failed attempts. Try again in 60 seconds.")
 
 
 def _record_failure(key: str) -> None:
@@ -265,17 +175,9 @@ def verify_password(password: str, hashed: str) -> bool:
 
 def create_token(user: PartnerUser) -> str:
     payload = {
-        # str() is required by PyJWT >= 2.10, which raises InvalidSubjectError on a
-        # non-string `sub`. PartnerUser.id is already a String(36) UUID, so this is
-        # defensive rather than a behaviour change — it keeps the claim well-typed
-        # if the column type ever changes.
-        "sub": str(user.id),
+        "sub": user.id,
         "username": user.username,
         "role": user.role,
-        # Issued-at, compared against `PartnerUser.password_changed_at` in
-        # get_current_user so a password change retires older sessions.
-        # Whole seconds, because that is the resolution JWT `iat` carries.
-        "iat": datetime.now(timezone.utc),
         "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRY_HOURS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -297,26 +199,12 @@ def get_current_user(
         user_id: str = payload.get("sub")
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
-    except PyJWTError:
+    except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = db.get(PartnerUser, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or inactive")
-
-    # Retire sessions minted before the current password. `iat` is absent from
-    # tokens issued by older builds; those are treated as pre-cutoff and
-    # rejected once a cut-off exists, which is the safe reading — the point of
-    # setting one is that everything older should stop working.
-    cutoff = getattr(user, "password_changed_at", None)
-    if cutoff is not None:
-        issued_at = payload.get("iat")
-        if issued_at is None:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-        if cutoff.tzinfo is None:
-            cutoff = cutoff.replace(tzinfo=timezone.utc)
-        if datetime.fromtimestamp(int(issued_at), tz=timezone.utc) < cutoff:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user
 
 
@@ -330,14 +218,8 @@ def require_admin(user: PartnerUser = Depends(get_current_user)) -> PartnerUser:
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    # Bounded at the boundary. `username` is the lockout bucket key, so an
-    # unbounded one lets a caller grow the in-memory failure table with a
-    # fresh multi-megabyte key per attempt; `password` is bounded because
-    # bcrypt only reads 72 bytes and hashing is deliberately slow. The
-    # body-size middleware caps the request at 10MB, which is the wrong order
-    # of magnitude for either of these fields.
-    username: str = Field(min_length=1, max_length=150)
-    password: str = Field(min_length=1, max_length=1024)
+    username: str
+    password: str
 
 
 class LoginResponse(BaseModel):
@@ -357,15 +239,12 @@ class UserInfo(BaseModel):
 
 @router.post("/login")
 def login(body: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
-    client_ip = _client_ip(request)
+    client_ip = request.client.host if request.client else "unknown"
     user_key = f"user:{body.username}"
-    # None means "not attributable to one client" — skip the tier rather than
-    # lumping every caller into a shared bucket. See _client_ip.
-    ip_key = f"ip:{client_ip}" if client_ip else None
+    ip_key = f"ip:{client_ip}"
 
     _check_lockout(user_key)
-    if ip_key:
-        _check_lockout(ip_key)
+    _check_lockout(ip_key)
 
     user = db.scalars(
         select(PartnerUser).where(PartnerUser.username == body.username)
@@ -373,49 +252,15 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
 
     if not user or not verify_password(body.password, user.password_hash):
         _record_failure(user_key)
-        if ip_key:
-            _record_failure(ip_key)
-        # Every failure, not just the fifth. Previously only the lockout
-        # THRESHOLD emitted an event, so credential-stuffing that stayed under
-        # five attempts per username — or spread across many usernames — was
-        # invisible to a SIEM rule. `reason_code` distinguishes a wrong
-        # password from an unknown account without naming either.
-        from app.core.security_events import emit_security_event
-        emit_security_event(
-            event_name="login_failed",
-            severity="low",
-            boundary="dashboard_login",
-            decision="rejected",
-            reason_code="unknown_user" if not user else "bad_password",
-        )
+        _record_failure(ip_key)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     if not user.is_active:
-        from app.core.security_events import emit_security_event
-        emit_security_event(
-            event_name="login_rejected_inactive_account",
-            severity="medium",
-            boundary="dashboard_login",
-            decision="rejected",
-            reason_code="account_deactivated",
-            actor=user.username,
-        )
         raise HTTPException(status_code=401, detail="Account is deactivated")
 
-    _clear_failures(*(k for k in (user_key, ip_key) if k))
+    _clear_failures(user_key, ip_key)
     token = create_token(user)
     _set_session_cookie(response, token)
-    # Structured, not just a free-text line: a successful login is the event a
-    # SIEM correlates the failures above against, and it needs the same shape
-    # to be queryable alongside them.
-    from app.core.security_events import emit_security_event
-    emit_security_event(
-        event_name="login_succeeded",
-        severity="low",
-        boundary="dashboard_login",
-        decision="accepted",
-        actor=user.username,
-    )
     logger.info("User logged in: %s", user.username)
     return {
         "user": {
@@ -444,20 +289,6 @@ def logout(request: Request, response: Response):
     if token:
         revoke_token(token)
     _clear_session_cookie(response)
-    # Session revocation left no record at all before this. It is the closing
-    # bracket on a session: without it, an audit trail can show a login and
-    # every action taken, but cannot show when — or whether — the operator
-    # ended it. The route is unauthenticated by design (it extracts and
-    # revokes whatever it was handed), so there is no verified identity to
-    # attribute; `decision` carries whether a token was actually presented.
-    from app.core.security_events import emit_security_event
-    emit_security_event(
-        event_name="session_revoked",
-        severity="low",
-        boundary="dashboard_login",
-        decision="accepted" if token else "noop",
-        reason_code="logout",
-    )
     return {"ok": True}
 
 
@@ -469,20 +300,11 @@ class ChangePasswordRequest(BaseModel):
 @router.post("/change-password")
 def change_password(
     body: ChangePasswordRequest,
-    response: Response,
-    request: Request,
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change the authenticated user's password and retire older sessions.
-
-    Every session that existed under the old password stops working; the
-    caller is re-issued a fresh cookie in this response so THEY are not logged
-    out. Previously the JWT simply remained valid, which meant a stolen cookie
-    survived the rotation for the rest of its 24h life — password change is
-    the standard containment step after a session is compromised, and it was
-    not containing anything.
-    """
+    """Change the authenticated user's password. JWT remains valid
+    afterwards — same identity, no forced re-login."""
     if not verify_password(body.current_password, user.password_hash):
         logger.warning("Change-password failed: user=%s reason=bad_current", user.username)
         raise HTTPException(status_code=401, detail="Current password is incorrect")
@@ -493,44 +315,18 @@ def change_password(
         raise HTTPException(status_code=422, detail="New password must differ from the current one")
 
     user.password_hash = hash_password(body.new_password)
-    # Whole seconds, matching the resolution of the `iat` claim this is
-    # compared against — a cut-off carrying microseconds would be strictly
-    # greater than the truncated `iat` of the token issued immediately below,
-    # and would reject the caller's own brand-new session.
-    user.password_changed_at = datetime.now(timezone.utc).replace(microsecond=0, tzinfo=None)
     db.commit()
-
-    # Revoke the presented token explicitly as well as by cut-off, so it stops
-    # working even in a process that has not reloaded the user row.
-    presented = _extract_token(request)
-    if presented:
-        revoke_token(presented)
-    _set_session_cookie(response, create_token(user))
-    logger.info("Password changed: user=%s (older sessions retired)", user.username)
+    logger.info("Password changed: user=%s", user.username)
     return {"detail": "Password changed"}
 
 
 # ── Seed default admin ──────────────────────────────────────────────────────
 
 def seed_admin(db: Session):
-    """Create default admin user if no users exist.
-
-    ADMIN_PASSWORD must be set via environment variable. The generated-password
-    path was removed (SAST finding F-001): printing the password to stdout puts
-    it in the container log, which is readable by anyone with docker daemon
-    access and retained indefinitely. Supplying ADMIN_PASSWORD via environment
-    (or .env file) is the documented setup path; `scripts/bootstrap.sh` does it.
-    """
+    """Create default admin user if no users exist."""
     count = db.scalars(select(PartnerUser)).first()
     if count is None:
-        supplied = (os.environ.get("ADMIN_PASSWORD") or "").strip()
-        if not supplied:
-            raise RuntimeError(
-                "ADMIN_PASSWORD environment variable is not set. "
-                "Set it before starting the service (e.g. in .env or docker-compose.yml). "
-                "See the project README or docker-compose.yml for setup instructions."
-            )
-        password = supplied
+        password = secrets.token_urlsafe(16)
         admin = PartnerUser(
             username="admin",
             password_hash=hash_password(password),
@@ -540,4 +336,5 @@ def seed_admin(db: Session):
         )
         db.add(admin)
         db.commit()
-        logger.info("Default admin user created (username: admin) — password from ADMIN_PASSWORD.")
+        logger.info("Default admin user created (username: admin)")
+        print(f"\n  Default admin password: {password}\n  ⚠️ SAVE THIS — shown once only\n")

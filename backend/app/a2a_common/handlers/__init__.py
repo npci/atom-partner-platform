@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A task handlers, split per task type.
 
 Each module owns one task type's persistence logic; `_background.py` holds the
@@ -14,9 +11,11 @@ from .cert_completion_signoff import handle_cert_completion_signoff
 from .cert_lifecycle import (
     handle_cert_case_result,
     handle_cert_config_request,
-    handle_cert_execution_start,
     handle_cert_setup_notification,
     handle_cert_verdict_notification,
+    handle_cert_waiver_decision,
+    handle_cert_verdict_dispute_response,
+    handle_cert_completion_report,
 )
 from .cert_test_response import handle_cert_test_response
 from .change_communication import handle_change_communication
@@ -26,6 +25,7 @@ from .negotiation_frozen import handle_negotiation_frozen
 from .revision_in_progress import handle_revision_in_progress
 from .round_closed import handle_round_closed
 from .round_opened import handle_round_opened
+from .txn import handle_txn_request, handle_txn_response
 
 __all__ = [
     "TaskReceiveRequest",
@@ -38,11 +38,15 @@ __all__ = [
     "handle_cert_completion_signoff",
     "handle_cert_case_result",
     "handle_cert_config_request",
-    "handle_cert_execution_start",
     "handle_cert_setup_notification",
     "handle_cert_verdict_notification",
+    "handle_cert_waiver_decision",
+    "handle_cert_verdict_dispute_response",
+    "handle_cert_completion_report",
     "handle_negotiation_frozen",
     "handle_revision_in_progress",
     "handle_round_opened",
     "handle_round_closed",
+    "handle_txn_request",
+    "handle_txn_response",
 ]

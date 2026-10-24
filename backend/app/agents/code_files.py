@@ -1,14 +1,11 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""Code RAG — whole-file generation.
+"""Code RAG Phase 3.4 — whole-file generation.
 
 Turns an implementation plan (from `agents/code.py`) into COMPLETE file contents
 that `services/git_integrator.py` commits to a merge request. A second LLM pass:
 the plan says *what* changes; this pass writes the actual files, grounded in the
 retrieved repo excerpts + the current contents of each file being modified.
 
-Mirrors the authority's `code_change.py` `<<FILE>>` whole-file convention (see
+Mirrors the NPCI `code_change.py` `<<FILE>>` whole-file convention (see
 backend/app/agents/code_change.py) but standalone, matching the partner's simpler
 agent shape. Pure — no DB / no GitLab here; the caller fetches current files and
 pushes the result."""
@@ -19,7 +16,6 @@ import re
 
 from app.agents import _common
 from app.agents.prompts import load_prompt
-from app.core.domain import prompt_block
 from app.core.llm import call_llm
 
 logger = logging.getLogger(__name__)
@@ -27,28 +23,11 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = load_prompt("code_files.md")
 
 # <<FILE: path>>\n<body>\n<<END>>  — non-greedy body, DOTALL so it spans lines.
-#
-# The path group is `[^\r\n>]+?`, NOT `.+?`. Two reasons, and both were live:
-#
-#  * Under DOTALL, `.+?` matched newlines, so a path could contain one — and
-#    `_BAD_PATH` anchors `^` at string start without re.MULTILINE, so
-#    `<<FILE: x\n/etc/passwd>>` produced the path "x\n/etc/passwd" and passed
-#    the guard. Excluding line breaks at the point of capture fixes it at the
-#    source rather than patching every anchor downstream.
-#  * Every unterminated `<<FILE:` made `.+?` rescan to end-of-string looking
-#    for `>>`, which is quadratic: 8k occurrences took 11s, 16k took 44s. The
-#    model's own output is the input here, so a prompt-injected document can
-#    steer it. Bounding the class ends the backtracking.
-_FILE_RE = re.compile(
-    r"<<FILE:[ \t]*(?P<path>[^\r\n>]+?)[ \t]*>>\n(?P<body>.*?)\n?<<END>>", re.DOTALL)
+_FILE_RE = re.compile(r"<<FILE:\s*(?P<path>.+?)\s*>>\n(?P<body>.*?)\n?<<END>>", re.DOTALL)
 
 # A path the model must never write to (defence-in-depth against an injected
 # instruction steering the commit outside the repo or into VCS internals).
-#
-# re.MULTILINE is deliberately NOT set — `^` must mean "start of the path", and
-# the capture above guarantees the path holds no line break. Control characters
-# are rejected outright so a stray \r or \x00 cannot split it either.
-_BAD_PATH = re.compile(r"(^/)|(^[A-Za-z]:)|(\.\.)|(^\.git/)|(/\.git/)|([\x00-\x1f])")
+_BAD_PATH = re.compile(r"(^/)|(^[A-Za-z]:)|(\.\.)|(^\.git/)|(/\.git/)")
 
 # Whole files per LLM call. A live 21-file plan overflowed a 32k budget in one
 # call, and a 6-file batch of LARGE files truncated too — output is size-bound,
@@ -216,7 +195,7 @@ def _generate_batch(
 
     parts: list[str] = [
         "PARTNER.md", "", profile_raw, "", "---", "",
-        f"{prompt_block('authority_cap', 'The authority')} change: {change_title}",
+        f"NPCI change: {change_title}",
     ]
     if design_summary:
         parts += ["", f"Design posture: {design_summary}"]

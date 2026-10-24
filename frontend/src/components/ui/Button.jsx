@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // Button — the one button primitive for the partner platform.
 // Composes the token-based .btn classes in index.css (real :hover/:disabled/
 // :focus-visible live there) and layers icon + loading affordances on top.

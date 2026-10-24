@@ -1,16 +1,12 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { useState, useEffect } from 'react';
 import { listUsers, createUser, deactivateUser } from '../services/api';
 import StatTile, { StatTileRow } from '../components/common/StatTile';
-import { blankNewUserForm, isNotEntered } from '../utils/formState';
 
 export default function Users() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState(blankNewUserForm);
+  const [form, setForm] = useState({ username: '', password: '', full_name: '', role: 'user' });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -30,16 +26,10 @@ export default function Users() {
   async function handleCreate(e) {
     e.preventDefault();
     setError('');
-    // Never submit an unfilled credential field: an empty password must be
-    // rejected here as well as server-side, so the request is not even attempted.
-    if (isNotEntered(form.username) || isNotEntered(form.password)) {
-      setError('Username and password are both required.');
-      return;
-    }
     setSaving(true);
     try {
       await createUser(form);
-      setForm(blankNewUserForm());
+      setForm({ username: '', password: '', full_name: '', role: 'user' });
       setShowForm(false);
       await loadUsers();
     } catch (err) {

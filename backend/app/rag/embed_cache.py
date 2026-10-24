@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Embedding cache over pgvector (`embedding_cache` on partner_postgres).
 
 Keyed on (content_sha256, embedding_model) so a model change never serves a stale
@@ -9,7 +6,7 @@ breaks ingestion. All-zero vectors (hard embed failures, see embeddings._embed_o
 are NOT cached, so a transient failure isn't frozen as a permanent dead entry.
 
 Raw SQL (psycopg + pgvector) rather than the SQLAlchemy pgvector type — matches
-the authority's approach and keeps the dependency surface to the Postgres extension only.
+NPCI's approach and keeps the dependency surface to the Postgres extension only.
 Vectors are passed as their text form `[f1,f2,...]` and cast to `vector`.
 """
 from __future__ import annotations

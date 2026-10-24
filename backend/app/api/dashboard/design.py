@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: design — run the partner Design agent against a change's
 product-kit documents, persist a versioned design document, serve it (JSON +
 .docx download).
@@ -21,8 +18,7 @@ from sqlalchemy.orm import Session
 from app.agents import registry
 from app.api.auth import get_current_user
 from app.database import get_db
-from app.core.llm import resolve_runtime_api_key
-from app.models import DesignReport, FeasibilityReport, IncomingChange, PartnerUser
+from app.models import DesignReport, FeasibilityReport, IncomingChange, PartnerSetting, PartnerUser
 from app.rag.retrieval import build_kb_context
 
 from ._shared import markdown_to_docx_bytes
@@ -39,7 +35,9 @@ def _kb_context(db: Session, change: IncomingChange) -> str:
 
 
 def _runtime_api_key(db: Session) -> str | None:
-    return resolve_runtime_api_key(db)
+    """Anthropic key pasted into partner_settings via the Settings UI, if any."""
+    row = db.get(PartnerSetting, "partner_anthropic_api_key")
+    return row.value if row and row.value else None
 
 
 def _latest_feasibility_summary(db: Session, change_id: str) -> str | None:

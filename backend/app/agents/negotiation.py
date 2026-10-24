@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """NegotiationAgent — STUB. Returns mock output demonstrating the I/O shape.
 
 Replace the `run()` body (and `prompts/negotiation.md`) with your real drafting

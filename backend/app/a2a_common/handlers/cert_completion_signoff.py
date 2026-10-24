@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `cert_completion_signoff` — the formal all-PASS
 sign-off NPCI emits after a cert run passes cleanly.
 
@@ -28,17 +25,17 @@ logger = logging.getLogger(__name__)
 
 def handle_cert_completion_signoff(body: TaskReceiveRequest, db: Session) -> dict:
     payload = body.payload or {}
-    authority_change_id = body.change_id or payload.get("change_id") or ""
+    npci_change_id = body.change_id or payload.get("change_id") or ""
 
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == authority_change_id)
+        .filter(IncomingChange.npci_change_id == npci_change_id)
         .first()
     )
     if not change:
         logger.warning(
-            "cert_completion_signoff for unknown change authority_change_id=%s — accepting but no-op",
-            authority_change_id,
+            "cert_completion_signoff for unknown change npci_change_id=%s — accepting but no-op",
+            npci_change_id,
         )
         return {"status": "accepted", "message": "Unknown change — discarded"}
 
@@ -59,15 +56,9 @@ def handle_cert_completion_signoff(body: TaskReceiveRequest, db: Session) -> dic
                     change.id,
                 )
             change.cert_signoff_docx_bytes = raw
-            # Same rule as the download route in api/dashboard/changes.py: the
-            # authority's own filename wins, and the fallback comes from the
-            # active pack rather than being a hardcoded brand.
-            from app.core.domain import get_active_pack
-
             change.cert_signoff_filename = (
                 payload.get("signoff_filename")
-                or (f"{get_active_pack().signoff.document_prefix()}"
-                    f"_Result_{authority_change_id}.docx")
+                or f"NPCI_Certification_Result_{npci_change_id}.docx"
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("cert_completion_signoff could not decode docx change=%s", change.id, exc_info=True)

@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """DB-backed `TaskStore` factory using the SDK's `DatabaseTaskStore`.
 
 The SDK ships a complete SQLAlchemy-based `TaskStore`
@@ -21,12 +18,12 @@ Required extras:
 
 The first call to `get_task_store(database_url)` builds the engine. The
 SDK's store does `CREATE TABLE IF NOT EXISTS` on first save/get when
-`create_table=True`, so no alembic migration is required here
+`create_table=True`, so no alembic migration is required for this slice
 — add one once the SDK schema stabilises if you want strict ownership.
 
-This module ships only the factory + URL translation. Tests for the
-actual Task lifecycle persistence land later, once an Executor exists
-to drive the store.
+Slice 2 ships only the factory + URL translation. Tests for the actual
+Task lifecycle persistence land in Slice 3 once an Executor exists to
+drive the store.
 """
 from __future__ import annotations
 

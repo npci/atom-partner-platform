@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `negotiation_frozen`.
 
 NPCI→bank notice that the negotiation has frozen (the round cap was reached).
@@ -24,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 def handle_negotiation_frozen(body: TaskReceiveRequest, db: Session) -> dict:
     payload = body.payload or {}
-    authority_change_id = payload.get("change_id", body.change_id or "")
+    npci_change_id = payload.get("change_id", body.change_id or "")
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == authority_change_id)
+        .filter(IncomingChange.npci_change_id == npci_change_id)
         .first()
     )
     if not change:

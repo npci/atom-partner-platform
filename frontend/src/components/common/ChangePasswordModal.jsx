@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { useState } from 'react'
 import { X, Loader, Eye, EyeOff, CheckCircle, AlertCircle } from 'lucide-react'
 import { changePassword } from '../../services/api'

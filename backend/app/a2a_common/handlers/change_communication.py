@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `change_communication`.
 
 Stores the incoming change + Product Kit documents (with checksum verification
@@ -50,85 +47,54 @@ def handle_change_communication(body: TaskReceiveRequest, db: Session) -> dict:
     """Process incoming change communication — store change + Product Kit
     documents. Idempotent on `payload.change_id`."""
     payload = body.payload or {}
-    authority_change_id = payload.get("change_id", body.change_id or "")
+    npci_change_id = payload.get("change_id", body.change_id or "")
     # v1.1: canonical `kit_version`; fall back to legacy `negotiation_version`.
     incoming_nv = int(payload.get("kit_version") or payload.get("negotiation_version", 1) or 1)
 
     existing = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == authority_change_id)
+        .filter(IncomingChange.npci_change_id == npci_change_id)
         .first()
     )
     if existing:
-        # Same or older version → normally a true duplicate retransmit; skip.
+        # Same or older version → a true duplicate retransmit; skip.
         if incoming_nv <= (existing.negotiation_version or 1):
-            # ...but NOT when this platform holds no documents for the change
-            # and the retransmit carries some. The authority can communicate a
-            # change BEFORE its product kit exists and ship the kit later at the
-            # SAME version — a first kit bumps nothing. Skipping wholesale then
-            # drops every document on the floor while the authority's UI reports
-            # "Ship N items" as a success, and this platform's analyser later
-            # fails with "no change documents supplied", which names neither the
-            # cause nor the sender. Observed with a change sitting on 0 documents
-            # while its siblings held 8-9, and re-shipping could never repair it.
-            #
-            # Idempotency is preserved: a retransmit of documents we already
-            # hold takes the skip below, and the ingest loop upserts per
-            # (change, doc_type) regardless.
-            incoming_docs = payload.get("product_kit") or payload.get("documents") or []
-            held = (
-                db.query(ChangeDocument)
-                .filter(ChangeDocument.change_id == existing.id)
-                .count()
-            )
-            if held or not incoming_docs:
-                logger.info(
-                    "Change already received: authority_change_id=%s local_id=%s "
-                    "v=%d — skipping",
-                    authority_change_id, existing.id, incoming_nv,
-                )
-                return {
-                    "status": "accepted",
-                    "message": "Change already received (duplicate skipped)",
-                    "local_id": existing.id,
-                }
-            logger.warning(
-                "Change already received at v=%d but this platform holds NO "
-                "documents for it — ingesting the %d document(s) in this "
-                "same-version retransmit rather than discarding them: "
-                "authority_change_id=%s local_id=%s",
-                incoming_nv, len(incoming_docs), authority_change_id, existing.id,
-            )
-            change = existing
-            change_id = existing.id
-        else:
-            # Higher version → a revision. Bump the mirror, reset acceptance so
-            # the "New version available" banner fires, and append the revised
-            # docs below (v1 rows are preserved for the version switcher).
             logger.info(
-                "Change revision received: authority_change_id=%s local_id=%s v%s→v%d",
-                authority_change_id, existing.id, existing.negotiation_version, incoming_nv,
+                "Change already received: npci_change_id=%s local_id=%s v=%d — skipping",
+                npci_change_id, existing.id, incoming_nv,
             )
-            existing.negotiation_version = incoming_nv
-            existing.negotiation_version_accepted = False
-            # A new kit version supersedes any prior decision — the partner must
-            # re-evaluate v(N) from scratch (accept / query / counter the new
-            # terms). Reset decision synchronously here; relying on the
-            # best-effort auto-ack is fragile (if PROPOSAL_ACKNOWLEDGED delivery
-            # fails a stale decision='accepted' would block counter_propose with
-            # "Already accepted"). The auto-ack advances this to 'acknowledged'.
-            existing.decision = "pending"
-            # New kit shipped → the revision the authority was preparing is
-            # done; lift the query hold so the partner can ask about it.
-            existing.revision_in_progress = False
-            existing.revision_target_version = None
-            change = existing
-            change_id = existing.id
+            return {
+                "status": "accepted",
+                "message": "Change already received (duplicate skipped)",
+                "local_id": existing.id,
+            }
+        # Higher version → a revision. Bump the mirror, reset acceptance so the
+        # "New version available" banner fires, and append the revised docs
+        # below (v1 rows are preserved for the version switcher).
+        logger.info(
+            "Change revision received: npci_change_id=%s local_id=%s v%s→v%d",
+            npci_change_id, existing.id, existing.negotiation_version, incoming_nv,
+        )
+        existing.negotiation_version = incoming_nv
+        existing.negotiation_version_accepted = False
+        # A new kit version supersedes any prior decision — the partner must
+        # re-evaluate v(N) from scratch (accept / query / counter the new terms).
+        # Reset decision synchronously here; relying on the best-effort auto-ack
+        # to do it is fragile (if PROPOSAL_ACKNOWLEDGED delivery fails a stale
+        # decision='accepted' would block counter_propose with "Already
+        # accepted"). The auto-ack advances this to 'acknowledged' on success.
+        existing.decision = "pending"
+        # New kit shipped → the revision NPCI was preparing is done; lift the
+        # query hold so the partner can ask about the revised kit.
+        existing.revision_in_progress = False
+        existing.revision_target_version = None
+        change = existing
+        change_id = existing.id
     else:
         change_id = str(uuid.uuid4())
         change = IncomingChange(
             id=change_id,
-            authority_change_id=authority_change_id,
+            npci_change_id=npci_change_id,
             title=payload.get("title", "Untitled Change"),
             initial_prompt=payload.get("initial_prompt"),
             enhanced_prompt=payload.get("enhanced_prompt"),
@@ -148,7 +114,7 @@ def handle_change_communication(body: TaskReceiveRequest, db: Session) -> dict:
     # the partner change page can show "what changed in this version".
     _summary = payload.get("change_summary")
     if _summary:
-        change.authority_change_summary = _summary
+        change.npci_change_summary = _summary
 
     # Build kit_files_received[] for the auto-ack while we iterate. Each
     # entry records whether the bytes we received hash to the value the
@@ -281,15 +247,7 @@ def handle_change_communication(body: TaskReceiveRequest, db: Session) -> dict:
                         "checksum_verified": actual == claimed_zip_sha,
                     })
             except Exception as exc:  # noqa: BLE001
-                # Type only — this decodes PARTNER-SUPPLIED bytes, so the
-                # exception message can carry attacker-influenced content
-                # (crafted filenames from the zip central directory) straight
-                # into the log (CWE-209 / log injection). Detail at DEBUG.
-                logger.warning(
-                    "Could not decode xsd zip attachment doc_type=%s: %s",
-                    doc_type, type(exc).__name__,
-                )
-                logger.debug("xsd zip decode failure detail doc_type=%s", doc_type, exc_info=True)
+                logger.warning("Could not decode xsd zip attachment doc_type=%s: %s", doc_type, exc)
                 zip_filename = None
 
         db.add(ChangeDocument(
@@ -325,7 +283,7 @@ def handle_change_communication(body: TaskReceiveRequest, db: Session) -> dict:
     # request returns promptly; all three steps are best-effort.
     kit_id = payload.get("kit_id")
     schedule_post_receive(
-        authority_change_id, change_id, kit_id, incoming_nv,
+        npci_change_id, change_id, kit_id, incoming_nv,
         body.message_id, kit_files_received,
     )
 

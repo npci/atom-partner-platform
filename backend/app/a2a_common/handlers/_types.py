@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Shared request shape for inbound A2A task handlers.
 
 `TaskReceiveRequest` is the legacy re-pack of an inbound A2A message that the
@@ -26,3 +23,5 @@ class TaskReceiveRequest(BaseModel):
     # Inbound envelope correlation_id — NPCI's per-(change, bank) thread id.
     # Captured on receipt and echoed on every reply about this change (v1.1 §5).
     correlation_id: str | None = None
+    # Inbound envelope cflow_id — echoed on bank-initiated follow-ups for the run.
+    cflow_id: str | None = None

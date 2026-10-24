@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Contract tests on the Agent interface + registry (WS8)."""
 import pytest
 
@@ -8,28 +5,16 @@ from app.agents import registry
 from app.agents.base import Agent
 from app.models import AgentRun
 
-def test_all_agents_registered_from_manifest():
-    # Read the manifest rather than hardcoding a second copy of it. The name of
-    # this test is "registered FROM MANIFEST" — the property worth holding is
-    # that the loader registers exactly what the manifest declares, not that the
-    # roster equals a list frozen when the test was written. The old hardcoded
-    # set went stale the moment code_reviewer/security_reviewer were added.
-    import yaml
-    from pathlib import Path
+EXPECTED_AGENTS = {"feasibility", "design", "code", "test", "negotiation"}
 
-    manifest = yaml.safe_load(
-        (Path(__file__).resolve().parents[1] / "config" / "agents.yaml").read_text()
-    )
-    declared = set((manifest.get("agents") or manifest).keys())
-    assert set(registry.all_names()) == declared
+
+def test_all_agents_registered_from_manifest():
+    assert set(registry.all_names()) == EXPECTED_AGENTS
 
 
 def test_execute_writes_audit_row_and_returns_dict(db_session):
     out = registry.get("design").execute({"change_title": "X"}, db=db_session, change_id="c1")
-    # The output no longer echoes its own agent name — the doc-producing agents
-    # return a document payload. Agent identity is carried by the audit row
-    # (asserted just below), which is the durable contract.
-    assert isinstance(out, dict) and out
+    assert isinstance(out, dict) and out["agent"] == "design"
     row = db_session.query(AgentRun).filter_by(agent_name="design").one()
     assert row.status == "succeeded"
     assert row.mode == "local"
@@ -81,24 +66,8 @@ def test_feasibility_returns_mock_with_six_areas_without_key(db_session):
     }
 
 
-def test_doc_agents_return_document_shape(db_session):
-    # design/code/test migrated from the flat {agent, status} stub to document
-    # payloads. Assert the STRUCTURE they all share, not mock-ness — these
-    # assertions must hold whether the agent answered from a live LLM or the
-    # mock fallback.
-    for name in ("design", "code", "test"):
+def test_stub_agents_return_documented_shape(db_session):
+    for name in ("design", "code", "test", "negotiation"):
         out = registry.get(name).execute({"change_title": "X", "topic": "deadline"}, db=db_session)
-        assert out["one_line_summary"]
-        assert isinstance(out["open_questions"], list)
-        assert isinstance(out["_meta"], dict)
-
-
-def test_negotiation_agent_still_returns_the_flat_stub_shape(db_session):
-    # negotiation is the ONE agent not migrated to a document payload; it still
-    # answers with the original flat shape. Pinned deliberately so the split is
-    # visible rather than looking like an oversight.
-    out = registry.get("negotiation").execute(
-        {"change_title": "X", "topic": "deadline"}, db=db_session
-    )
-    assert out["agent"] == "negotiation"
-    assert out["kind"] and out["draft_message"] and out["rationale"]
+        assert out["agent"] == name
+        assert out["status"] == "mock"

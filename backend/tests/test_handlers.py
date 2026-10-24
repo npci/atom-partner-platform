@@ -1,10 +1,5 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Smoke tests for each inbound A2A handler (WS8)."""
 import json
-
-import pytest
 
 from app.a2a_common.handlers import (
     TaskReceiveRequest,
@@ -92,17 +87,17 @@ def test_change_communication_stores_correlation_id(db_session):
         payload={"change_id": "NPCI-CORR", "title": "T", "product_kit": []},
     )
     handle_change_communication(body, db_session)
-    row = db_session.query(IncomingChange).filter_by(authority_change_id="NPCI-CORR").one()
+    row = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-CORR").one()
     assert row.correlation_id == "corr-X"
 
 
 def test_replies_echo_stored_correlation_id(db_session, monkeypatch):
     """A reply that doesn't set its own payload correlation_id echoes NPCI's
     stored per-(change, bank) thread id on the envelope (v1.1 §5)."""
-    from app import authority_client
+    from app import npci_client
 
     db_session.add(IncomingChange(
-        id="local-corr-1", authority_change_id="NPCI-CORR", title="T",
+        id="local-corr-1", npci_change_id="NPCI-CORR", title="T",
         negotiation_version=1, correlation_id="corr-X",
     ))
     db_session.commit()
@@ -112,18 +107,18 @@ def test_replies_echo_stored_correlation_id(db_session, monkeypatch):
     async def _fake_send(**kwargs):
         captured["data"] = kwargs["data"]
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
     # send_blocker sets no payload correlation_id → the stored thread id is used.
-    authority_client.send_blocker(db_session, "NPCI-CORR", "B1", "high", "desc")
+    npci_client.send_blocker(db_session, "NPCI-CORR", "B1", "high", "desc")
     assert captured["data"]["correlation_id"] == "corr-X"
 
     # The query path keeps its own payload correlation_id (OutgoingQuery pointer).
     captured.clear()
-    authority_client.send_query(db_session, "NPCI-CORR", "a question", correlation_id="q-row-42")
+    npci_client.send_query(db_session, "NPCI-CORR", "a question", correlation_id="q-row-42")
     assert captured["data"]["correlation_id"] == "q-row-42"
 
 
@@ -131,10 +126,10 @@ def test_readiness_declaration_payload_spec_shaped(db_session, monkeypatch):
     """v1.1 §cert_readiness_declaration: declared_at/version_implementing present,
     `role` kept for case selection, and `test_data`/`test_data_per_case` dropped
     from the wire — they belong to cert_config_submission."""
-    from app import authority_client
+    from app import npci_client
 
     db_session.add(IncomingChange(
-        id="local-rd1", authority_change_id="NPCI-RD", title="T", negotiation_version=3,
+        id="local-rd1", npci_change_id="NPCI-RD", title="T", negotiation_version=3,
     ))
     db_session.commit()
 
@@ -143,13 +138,13 @@ def test_readiness_declaration_payload_spec_shaped(db_session, monkeypatch):
     async def _fake_send(**kwargs):
         captured["data"] = kwargs["data"]
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
     # test_data is still ACCEPTED by the signature but must not reach the wire.
-    authority_client.declare_ready(
+    npci_client.declare_ready(
         db_session, "NPCI-RD", role="PAYER_PSP",
         test_data={"vpa": "a@b"}, test_data_per_case={"RE_1": {"vpa": "a@b"}},
     )
@@ -174,7 +169,7 @@ def test_blocker_resolution_v1_1_string_and_legacy_object(db_session):
 
     def _seed(npci_id, local_id):
         db_session.add(IncomingChange(
-            id=local_id, authority_change_id=npci_id, title="T", negotiation_version=1,
+            id=local_id, npci_change_id=npci_id, title="T", negotiation_version=1,
             blockers=_json.dumps([{"blocker_id": "BLK-1", "status": "open", "description": "x"}]),
         ))
         db_session.commit()
@@ -215,23 +210,23 @@ def test_blocker_resolution_v1_1_string_and_legacy_object(db_session):
 def test_blocker_payload_spec_shaped(db_session, monkeypatch):
     """A2A v1.0 §blocker: raised_at populated; type/subject/blocks/references
     defaults present; richer investigation_done/options_considered lists kept."""
-    from app import authority_client
+    from app import npci_client
 
     captured = {}
 
     async def _fake_send(**kwargs):
         captured["data"] = kwargs["data"]
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
-    authority_client.send_blocker(
+    npci_client.send_blocker(
         db_session, "NPCI-B", "BLK-1", "high", "Simulator non-deterministic",
         impact="Blocks RE_5", investigation_done=["24h traces"],
         options_considered=[{"option": "route around", "eta": None, "impact": "risky"}],
-        requested_action_from_authority="Fix simulator",
+        requested_action_from_npci="Fix simulator",
     )
 
     p = captured["data"]["payload"]
@@ -242,24 +237,14 @@ def test_blocker_payload_spec_shaped(db_session, monkeypatch):
     assert p["investigation_done"] == ["24h traces"]              # richer list kept
     assert p["options_considered"][0]["option"] == "route around"  # structured kept
 
-    # DUAL-WRITTEN while the authority still reads the branded spellings. Both
-    # must carry the same value: the neutral key is not a new field with
-    # different semantics, it is the same field under the name the wire is
-    # migrating to. When the authority switches its reads, the `*_npci` /
-    # `bank_*` half of each pair goes away and these assertions invert.
-    assert p["requested_action_from_authority"] == "Fix simulator"
-    assert p["requested_action_from_npci"] == "Fix simulator"
-    assert p["partner_lead"] is None and p["bank_lead"] is None
-    assert p["partner_internal_ticket"] is None and p["bank_internal_ticket"] is None
-
 
 def test_milestone_update_payload_spec_shaped(db_session, monkeypatch):
     """A2A v1.0 §milestone_update: version_implementing/completed_at/next_milestone
     populated; evidence_refs/risks default; state=completed + notes kept."""
-    from app import authority_client
+    from app import npci_client
 
     db_session.add(IncomingChange(
-        id="local-m1", authority_change_id="NPCI-M", title="T", negotiation_version=2,
+        id="local-m1", npci_change_id="NPCI-M", title="T", negotiation_version=2,
     ))
     db_session.commit()
 
@@ -268,13 +253,13 @@ def test_milestone_update_payload_spec_shaped(db_session, monkeypatch):
     async def _fake_send(**kwargs):
         captured.setdefault("sends", []).append(kwargs["data"])
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
-    authority_client.report_progress(db_session, "NPCI-M", "design_completed", notes="Board reviewed")
-    authority_client.report_progress(db_session, "NPCI-M", "testing_completed")
+    npci_client.report_progress(db_session, "NPCI-M", "design_completed", notes="Board reviewed")
+    npci_client.report_progress(db_session, "NPCI-M", "testing_completed")
 
     design = captured["sends"][0]["payload"]
     assert design["milestone"] == "design"
@@ -293,20 +278,20 @@ def test_milestone_update_payload_spec_shaped(db_session, monkeypatch):
 def test_query_payload_spec_shaped(db_session, monkeypatch):
     """A2A v1.0 §query: query_id/question/asked_at/phase present; legacy
     `message` kept for the NPCI executor; cert variant sets phase=cert."""
-    from app import authority_client
+    from app import npci_client
 
     captured = {}
 
     async def _fake_send(**kwargs):
         captured.setdefault("sends", []).append(kwargs["data"])
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
-    authority_client.send_query(db_session, "NPCI-Q", "Timeout end-to-end?", correlation_id="q-1")
-    authority_client.send_cert_query(db_session, "NPCI-Q", "Cert env ready?", correlation_id="q-2")
+    npci_client.send_query(db_session, "NPCI-Q", "Timeout end-to-end?", correlation_id="q-1")
+    npci_client.send_cert_query(db_session, "NPCI-Q", "Cert env ready?", correlation_id="q-2")
 
     gen = captured["sends"][0]["payload"]
     assert gen["query_id"] == "q-1"
@@ -324,10 +309,10 @@ def test_query_payload_spec_shaped(db_session, monkeypatch):
 def test_counter_proposal_payload_spec_shaped(db_session, monkeypatch):
     """A2A v1.0 §counter_proposal: version_targeted + counters[] + summary/
     references present; in_response_to:kit_id dropped; legacy fields kept."""
-    from app import authority_client
+    from app import npci_client
 
     db_session.add(IncomingChange(
-        id="local-cp-1", authority_change_id="NPCI-CP", title="T", negotiation_version=2,
+        id="local-cp-1", npci_change_id="NPCI-CP", title="T", negotiation_version=2,
     ))
     db_session.commit()
 
@@ -336,12 +321,12 @@ def test_counter_proposal_payload_spec_shaped(db_session, monkeypatch):
     async def _fake_send(**kwargs):
         captured["data"] = kwargs["data"]
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
-    authority_client.send_counter_proposal(
+    npci_client.send_counter_proposal(
         db_session, "NPCI-CP", "CHG_abc123", "cp-1",
         justification="Peak p99 is 6.8s; need 8s.", negotiation_round=1,
     )
@@ -361,10 +346,10 @@ def test_counter_proposal_payload_spec_shaped(db_session, monkeypatch):
 def test_change_acknowledgement_payload_carries_version_accepted(db_session, monkeypatch):
     """A2A v1.0 §change_acknowledgement: version_accepted present (from the held
     kit version), no stray in_response_to, enrichments preserved."""
-    from app import authority_client
+    from app import npci_client
 
     db_session.add(IncomingChange(
-        id="local-acc-1", authority_change_id="NPCI-ACC", title="T",
+        id="local-acc-1", npci_change_id="NPCI-ACC", title="T",
         negotiation_version=2, correlation_id="corr-X",
     ))
     db_session.commit()
@@ -374,12 +359,12 @@ def test_change_acknowledgement_payload_carries_version_accepted(db_session, mon
     async def _fake_send(**kwargs):
         captured["data"] = kwargs["data"]
 
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "tok")
-    monkeypatch.setattr(authority_client, "_get_a2a_base_url", lambda db: "http://npci.test")
-    monkeypatch.setattr(authority_client, "_get_setting", lambda db, k, default="": "")
-    monkeypatch.setattr(authority_client, "send_a2a_message", _fake_send)
+    monkeypatch.setattr(npci_client, "authenticate", lambda db: "tok")
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci.test")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": "")
+    monkeypatch.setattr(npci_client, "send_a2a_message", _fake_send)
 
-    authority_client.send_proposal_acceptance(
+    npci_client.send_proposal_acceptance(
         db_session, "NPCI-ACC", "CHG_abc123",
         accepted_by={"role": "cert_lead", "name": "Priya", "email": "p@bankx"},
         internal_change_advisory_ref="HDFC-CAB-1",
@@ -402,7 +387,7 @@ def test_proposal_acknowledged_payload_conforms_to_spec(db_session, monkeypatch)
     """A2A v1.0 §proposal_acknowledged: in_response_to = inbound message_id,
     version_received present, kit_files_received is a doc_type string list, plus
     the additive kit_files_verified checksum receipt."""
-    from app import authority_client
+    from app import npci_client
 
     captured = {}
 
@@ -410,14 +395,14 @@ def test_proposal_acknowledged_payload_conforms_to_spec(db_session, monkeypatch)
         captured.update(task_type=task_type, change_id=change_id, payload=payload)
         return {"status": "delivered"}
 
-    monkeypatch.setattr(authority_client, "send_task", _fake_send_task)
+    monkeypatch.setattr(npci_client, "send_task", _fake_send_task)
 
     kit_files = [
         {"doc_type": "brd", "kind": "content", "checksum_verified": True},
         {"doc_type": "brd", "kind": "docx", "name": "BRD.docx", "checksum_verified": True},
         {"doc_type": "tech_spec", "kind": "content", "checksum_verified": True},
     ]
-    authority_client.send_proposal_acknowledged(
+    npci_client.send_proposal_acknowledged(
         db_session, "NPCI-1", "CHG_abc123", 2, "msg-N-001", kit_files,
     )
 
@@ -435,7 +420,7 @@ def test_clarification_response_matches_by_query_id(db_session):
     """v1.1: NPCI's clarification_response carries the spec's `query_id` (not
     `correlation_id`); the partner still matches the exact OutgoingQuery."""
     db_session.add(IncomingChange(
-        id="loc-q1", authority_change_id="NPCI-Q", title="T", negotiation_version=1,
+        id="loc-q1", npci_change_id="NPCI-Q", title="T", negotiation_version=1,
     ))
     db_session.add(OutgoingQuery(
         id="oq1", change_id="loc-q1", message="Timeout end-to-end?",
@@ -471,9 +456,9 @@ def test_clarification_counter_proposal_sets_negotiating(db_session):
         }},
     )
     handle_clarification_response(body, db_session)
-    ch = db_session.query(IncomingChange).filter_by(authority_change_id="NPCI-1").one()
+    ch = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-1").one()
     assert ch.decision == "negotiating"
-    assert ch.authority_counter is not None
+    assert ch.npci_counter is not None
 
 
 def test_counter_decision_first_class_records(db_session):
@@ -495,7 +480,7 @@ def test_counter_decision_first_class_records(db_session):
         }},
     )
     handle_counter_decision(body, db_session)
-    ch = db_session.query(IncomingChange).filter_by(authority_change_id="NPCI-1").one()
+    ch = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-1").one()
     db_session.refresh(q)
     cds = json.loads(ch.counter_decisions)
     assert cds[-1]["decision"] == "ACCEPT"
@@ -524,7 +509,7 @@ def test_clarification_regular_answers_query(db_session):
 
 def test_blocker_resolution_patches_blocker(db_session):
     _mk_change(db_session)
-    ch = db_session.query(IncomingChange).filter_by(authority_change_id="NPCI-1").one()
+    ch = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-1").one()
     ch.blockers = json.dumps([{"blocker_id": "b1", "status": "open"}])
     db_session.commit()
     body = TaskReceiveRequest(
@@ -544,7 +529,7 @@ def test_blocker_resolution_patches_blocker(db_session):
 
 def test_blocker_status_update_patches_non_terminal(db_session):
     _mk_change(db_session)
-    ch = db_session.query(IncomingChange).filter_by(authority_change_id="NPCI-1").one()
+    ch = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-1").one()
     ch.blockers = json.dumps([{"blocker_id": "b1", "status": "open"}])
     db_session.commit()
     body = TaskReceiveRequest(
@@ -574,17 +559,52 @@ def test_cert_test_response_records_summary_and_certifies(db_session):
         payload={"cert_run_id": "r1", "total": 2, "passed": 2, "failed": 0, "results": []},
     )
     handle_cert_test_response(body, db_session)
-    ch = db_session.query(IncomingChange).filter_by(authority_change_id="NPCI-1").one()
+    ch = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-1").one()
     assert ch.cert_summary is not None
     assert ch.cert_status == "certified"
 
 
-# ── Dispatch-registry guards (retrofit PR-1) ─────────────────────────────────
-# The cert lifecycle handlers were wired, then silently unwired by an unrelated
-# merge, TWICE. Nothing failed either time: handlers.get() returned None, the
-# type was already in _INBOUND_TASK_TYPES, and the executor answered with a
-# generic ack — HTTP 200, status=accepted, correct at every layer except the
-# conversation the user was watching. These two make that failure loud.
+def test_a_partial_batch_does_not_certify_and_wire_statuses_are_stored_as_the_ui_reads_them(db_session):
+    _mk_change(db_session)
+    batch = TaskReceiveRequest(
+        task_type="cert_test_response",
+        change_id="NPCI-1",
+        payload={"batch_id": "CFLOW-1", "initiator": "npci", "final": False,
+                 "total": 2, "passed": 2, "failed": 0, "pending": [],
+                 "results": [
+                     {"case_id": "RE_1", "status": "passed", "details": {"internal_status": "PASS"}},
+                     {"case_id": "RE_2", "status": "error", "details": {"internal_status": "SKIP"}},
+                 ]},
+    )
+    handle_cert_test_response(batch, db_session)
+    ch = db_session.query(IncomingChange).filter_by(npci_change_id="NPCI-1").one()
+    assert ch.cert_status != "certified"
+    cases = json.loads(ch.cert_summary)["cases"]
+    # The UI table compares upper-case internal values; SKIP survives the wire's flattening.
+    assert [c["status"] for c in cases] == ["PASS", "SKIP"]
+
+    final = TaskReceiveRequest(
+        task_type="cert_test_response", change_id="NPCI-1",
+        payload={"batch_id": "CFLOW-1", "initiator": "all", "final": True,
+                 "total": 2, "passed": 2, "failed": 0, "results": []},
+    )
+    handle_cert_test_response(final, db_session)
+    db_session.refresh(ch)
+    assert ch.cert_status == "certified"
+
+
+# ── Cert lifecycle: the bank's half of the A2A cert conversation ──────────────
+#
+# These guard a regression that shipped twice. 68cd0a44 wired the four
+# cert_lifecycle handlers into partner_executor; 33dc4a9e (an unrelated
+# round_opened/round_closed change) deleted them again in a merge. Nothing
+# failed: the executor fell through to a generic ack, which is a 200 with
+# status=accepted at every layer. The only visible symptom was that the bank
+# stopped appearing in the certification conversation — 30 cert_case_result
+# messages went out and the bank replied meaningfully to none of them.
+#
+# So the important test here is the first one: it fails on DELETION, which is
+# the failure mode that actually occurred.
 
 def test_every_declared_task_type_has_a_handler():
     """The dispatch registry must cover every task type we claim to handle."""
@@ -606,32 +626,8 @@ def test_cert_task_types_are_recognised_inbound():
     assert not missing, f"handled but not in _INBOUND_TASK_TYPES: {sorted(missing)}"
 
 
-# ── Cert lifecycle behaviour (retrofit PR-3, upstream 5d0e3827) ──────────────
-# These are the six that PR-1 deliberately left out: their implementation ships
-# with this commit (spec-shaped config + per-case readiness), not with the
-# dispatch restore.
-
-@pytest.fixture
-def upi_pack(monkeypatch):
-    """Select the `upi` pack for the cert-config tests below.
-
-    The certification fallback profile moved out of `cert_lifecycle.py` and into
-    the domain pack, and the DEFAULT pack (`generic`) deliberately supplies
-    none — an unconfigured deployment must not transmit an invented participant
-    identity. These tests assert the SPEC SHAPE of a submission, which needs a
-    pack that actually populates it. `upi.yaml` carries the exact literals this
-    handler used to hardcode, so the assertions below are unchanged.
-    """
-    from app.core.domain import clear_cache
-
-    monkeypatch.setenv("DOMAIN_PACK", "app/packs/upi/upi.yaml")
-    clear_cache()
-    yield
-    clear_cache()
-
-
-def test_config_request_returns_the_partners_config(db_session, upi_pack):
-    """The orchestrator reads response_body['config'] to onboard the partner."""
+def test_config_request_returns_the_banks_config(db_session):
+    """The orchestrator reads response_body['config'] to onboard the bank in precert."""
     from app.a2a_common.handlers import handle_cert_config_request
 
     body = TaskReceiveRequest(
@@ -662,7 +658,7 @@ def test_config_request_returns_the_partners_config(db_session, upi_pack):
     assert cfg["bank_server_port"] == "8443"
 
 
-def test_config_carries_no_certificate_bodies(db_session, upi_pack):
+def test_config_carries_no_certificate_bodies(db_session):
     """Spec: certificate bodies are NEVER inline — only cert_ref + fingerprint."""
     from app.a2a_common.handlers import handle_cert_config_request
 
@@ -673,7 +669,7 @@ def test_config_carries_no_certificate_bodies(db_session, upi_pack):
     assert sec["ssl_signer"] is None and sec["ssl_client_cert"] is None
 
 
-def test_setup_notification_returns_per_case_data(db_session, upi_pack):
+def test_setup_notification_returns_per_case_data(db_session):
     """The orchestrator feeds response_body['case_data'][tc] in as CaseSpec.overrides."""
     from app.a2a_common.handlers import handle_cert_setup_notification
 
@@ -734,9 +730,134 @@ def test_verdict_notification_requests_a_waiver(db_session):
         payload={"test_case_id": "RE_87", "classification": "waiver_eligible"},
     ), db_session)
     assert out["task_type"] == "cert_waiver_request"
-    assert out["test_case_id"] == "RE_87"
+    assert out["case_ids"] == ["RE_87"]
     # Spec splits these: `category` is the enum NPCI records the waiver under,
     # `reason` the prose. Sending prose as the category is what the old single
     # field did.
     assert out["category"] == "non_applicable"
     assert out["reason"] and out["reason"] != out["category"]
+
+
+# ── verdict / waiver / config echo (NPCI waiver registry, dispute, identity) ──
+
+
+def _req(payload, task_type):
+    from app.a2a_common.handlers import TaskReceiveRequest
+    return TaskReceiveRequest(task_type=task_type, change_id="NPCI-1", payload=payload,
+                              task_id="t", message_id="m", correlation_id="c")
+
+
+def test_verdict_requests_waiver_only_when_waiver_eligible():
+    from app.a2a_common.handlers import handle_cert_verdict_notification as h
+    assert h(_req({"test_case_id": "RE_87", "classification": "waiver_eligible"}, "cert_verdict_notification"), None)["task_type"] == "cert_waiver_request"
+    assert h(_req({"test_case_id": "RE_87", "classification": "real_defect"}, "cert_verdict_notification"), None)["task_type"] == "cert_verdict_acceptance"
+    assert h(_req({"test_case_id": "RE_87"}, "cert_verdict_notification"), None)["task_type"] == "cert_waiver_request"
+
+
+def test_one_verdict_for_several_cases_is_answered_once():
+    from app.a2a_common.handlers import handle_cert_verdict_notification as h
+    out = h(_req({"initiator": "bank", "verdicts": [
+        {"case_id": "MA_1", "classification": "real_defect"},
+        {"case_id": "MA_2", "classification": "waiver_eligible"}]}, "cert_verdict_notification"), None)
+    assert out["initiator"] == "bank" and out["case_ids"] == ["MA_1", "MA_2"]
+    assert out["waiver_requests"] == [{"case_id": "MA_2"}] and out["accepted_case_ids"] == ["MA_1"]
+
+
+def test_one_waiver_decision_for_several_cases():
+    from app.a2a_common.handlers import handle_cert_waiver_decision as h
+    out = h(_req({"decisions": [{"case_id": "A", "decision": "granted"},
+                                {"case_id": "B", "decision": "denied"}]}, "cert_waiver_decision"), None)
+    assert [d["case_id"] for d in out["decisions"]] == ["A", "B"] and out["next"] == "fix_or_dispute"
+
+
+def test_denied_waiver_points_at_fix_or_dispute():
+    from app.a2a_common.handlers import handle_cert_waiver_decision as h
+    assert h(_req({"test_case_id": "RE_87", "decision": "denied"}, "cert_waiver_decision"), None)["next"] == "fix_or_dispute"
+    assert h(_req({"test_case_id": "RE_87", "decision": "granted"}, "cert_waiver_decision"), None)["next"] == "none"
+
+
+def test_config_echoes_requested_identity():
+    from app.a2a_common.handlers import handle_cert_config_request as h
+    out = h(_req({"target_identity": {"product": "upi", "org_id": "X", "kind": "core"}}, "cert_config_request"), None)
+    assert out["identity"]["kind"] == "core" and out["identity"]["org_id"]
+    assert "identity" not in h(_req({}, "cert_config_request"), None)
+
+
+# ── cert test data and the acceptance call (found in the live NPCI <-> partner run) ──
+
+def test_generated_names_are_alphabetic_because_precert_rejects_digits():
+    import re
+    from app.adapters.static import _stub_for_case
+    for case in ("RE_87", "MT_116B", "BE_22", "PR_01_CT_USR", "X"):
+        d = _stub_for_case(case)
+        assert re.fullmatch(r"[A-Za-z ]+", d["payerName"]), d["payerName"]
+        assert re.fullmatch(r"[A-Za-z ]+", d["beneName"]), d["beneName"]
+    assert _stub_for_case("RE_87")["payerName"] != _stub_for_case("RE_88")["payerName"]   # still distinct
+
+
+def test_accepting_a_verdict_sends_one_acceptance_naming_every_accepted_case(monkeypatch):
+    from app.a2a_common.handlers import cert_lifecycle, _background
+    sent = []
+    monkeypatch.setattr(_background, "schedule_verdict_acceptance",
+                        lambda change_id, ids, cflow_id=None: sent.append((change_id, ids)))
+    out = cert_lifecycle.handle_cert_verdict_notification(
+        _req({"initiator": "npci", "verdicts": [
+            {"case_id": "A", "classification": "real_defect"},
+            {"case_id": "B", "classification": "waiver_eligible"},
+            {"case_id": "C", "classification": "real_defect"}]}, "cert_verdict_notification"), None)
+    assert sent == [("NPCI-1", ["A", "C"])]                  # one call, only the accepted cases
+    assert out["accepted_case_ids"] == ["A", "C"] and out["waiver_requests"] == [{"case_id": "B"}]
+
+
+def test_the_acceptance_carries_the_verdicts_cflow_id(monkeypatch):
+    from app.a2a_common.handlers import cert_lifecycle, _background
+    sent = []
+    monkeypatch.setattr(_background, "schedule_verdict_acceptance",
+                        lambda change_id, ids, cflow_id=None: sent.append(cflow_id))
+    req = _req({"initiator": "npci", "verdicts": [{"case_id": "A", "classification": "real_defect"}]},
+               "cert_verdict_notification")
+    req.cflow_id = "CFLOW-1"
+    cert_lifecycle.handle_cert_verdict_notification(req, None)
+    assert sent == ["CFLOW-1"]
+
+
+def test_send_task_puts_cflow_id_on_the_envelope(monkeypatch):
+    from app import npci_client
+    sent = []
+
+    async def fake_send(**kw):
+        sent.append(kw["data"].get("cflow_id"))
+
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: "tok")
+    monkeypatch.setattr(npci_client, "send_a2a_message", fake_send)
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://x")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k: None)
+    q = type("Q", (), {"filter": lambda s, *a: s, "first": lambda s: None})()
+    db = type("D", (), {"query": lambda self, *a: q})()
+    npci_client.send_task(db, "cert_verdict_acceptance", "NPCI-1", {"case_ids": ["A"]}, cflow_id="CFLOW-1")
+    npci_client.send_task(db, "cert_signoff_request", "NPCI-1", {"cflow_id": "CFLOW-2"})  # hoisted from payload
+    npci_client.send_task(db, "cert_status_update", "NPCI-1", {})                          # none known: omitted
+    assert sent == ["CFLOW-1", "CFLOW-2", None]
+
+
+def test_a_verdict_with_nothing_to_accept_sends_no_acceptance(monkeypatch):
+    from app.a2a_common.handlers import cert_lifecycle, _background
+    sent = []
+    monkeypatch.setattr(_background, "schedule_verdict_acceptance", lambda c, i: sent.append(i))
+    cert_lifecycle.handle_cert_verdict_notification(
+        _req({"verdicts": [{"case_id": "B", "classification": "waiver_eligible"}]}, "cert_verdict_notification"), None)
+    assert sent == []
+
+
+def test_the_acceptance_payload_names_all_cases():
+    from app import npci_client
+    seen = {}
+    orig = npci_client.send_task
+    npci_client.send_task = lambda db, tt, cid, payload, **kw: seen.update(tt=tt, payload=payload) or {"status": "delivered"}
+    try:
+        npci_client.send_cert_verdict_acceptance(None, "NPCI-1", case_ids=["A", "C"], note="n")
+        assert seen["tt"] == "cert_verdict_acceptance" and seen["payload"] == {"case_ids": ["A", "C"], "note": "n"}
+        npci_client.send_cert_verdict_acceptance(None, "NPCI-1", "ONE")             # the old single-case call
+        assert seen["payload"] == {"case_ids": ["ONE"]}
+    finally:
+        npci_client.send_task = orig

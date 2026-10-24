@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """RemoteAgent (url: binding) tests + the reserved mcp: binding (WS8)."""
 import httpx
 import pytest

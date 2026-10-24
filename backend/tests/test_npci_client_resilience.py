@@ -1,202 +1,202 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
+"""Bank -> NPCI sends: token cache, bounded retry, reused TLS context / agent card.
 
-"""Tests for authority_client.py's outbound resilience (circuit breaker + bulkhead)
-and retry-queue behavior, plus correlation id propagation."""
+Network is faked at `httpx.post` and `send_a2a_message`; no NPCI is needed.
+"""
+import asyncio
+import base64
+import json
+import time
+from types import SimpleNamespace
+
+import httpx
 import pytest
 
-from app.core.correlation import use_correlation_id
-from app.core.resilience import CircuitOpenError, reset_for_tests
-from app.models import IncomingChange, OutboundA2ARetry, PartnerSetting
-from app.authority_client import send_task
+from app import npci_client
+from app.a2a_common import client as a2a_client
+
+
+def _jwt(ttl: float) -> str:
+    claims = base64.urlsafe_b64encode(json.dumps({"exp": time.time() + ttl}).encode()).decode().rstrip("=")
+    return f"h.{claims}.s"
 
 
 @pytest.fixture(autouse=True)
-def _reset():
-    reset_for_tests()
+def _clean(monkeypatch):
+    npci_client._tokens.clear()
+    a2a_client._cards.clear()
+    monkeypatch.setattr(npci_client, "_get_a2a_base_url", lambda db: "http://npci")
+    monkeypatch.setattr(npci_client, "_get_api_key", lambda db, bank_org_id=None: "key-1")
+    monkeypatch.setattr(npci_client, "_get_setting", lambda db, k, default="": default)
     yield
-    reset_for_tests()
+    npci_client._tokens.clear()
+    a2a_client._cards.clear()
 
 
-def _authenticated(monkeypatch):
-    import app.authority_client as authority_client
-    monkeypatch.setattr(authority_client, "authenticate", lambda db: "fake-jwt-token")
+def _fake_post(monkeypatch, tokens):
+    posts = []
+
+    def post(url, json=None, timeout=None):
+        posts.append(json["api_key"])
+        return SimpleNamespace(status_code=200, text="", json=lambda: {"jwt": tokens[len(posts) - 1]})
+
+    monkeypatch.setattr(httpx, "post", post)
+    return posts
 
 
-def _seed_settings(db_session):
-    db_session.add(PartnerSetting(key="authority_a2a_url", value="http://authority_backend:8000"))
-    db_session.commit()
+# ── token cache ──────────────────────────────────────────────────────────────
+
+def test_token_is_fetched_once_while_it_is_valid(monkeypatch):
+    posts = _fake_post(monkeypatch, [_jwt(900), _jwt(900)])
+    first = npci_client.authenticate(None)
+    assert npci_client.authenticate(None) == first and len(posts) == 1
 
 
-class TestSendTaskSuccessPath:
-    def test_success_returns_delivered(self, db_session, monkeypatch):
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
-
-        async def _fake_send(*a, **kw):
-            return None
-
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _fake_send)
-        result = send_task(db_session, "query", "change-1", {"message": "hi"})
-        assert result == {"status": "delivered"}
-        assert db_session.query(OutboundA2ARetry).count() == 0  # nothing queued on success
+def test_a_token_about_to_expire_is_not_reused(monkeypatch):
+    posts = _fake_post(monkeypatch, [_jwt(30), _jwt(900)])   # inside the 60 s skew
+    npci_client.authenticate(None)
+    npci_client.authenticate(None)
+    assert len(posts) == 2
 
 
-class TestSendTaskFailureEnqueuesRetry:
-    def test_transport_failure_enqueues_retry_row(self, db_session, monkeypatch):
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
-
-        async def _failing_send(*a, **kw):
-            raise RuntimeError("connection reset")
-
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _failing_send)
-        result = send_task(db_session, "query", "change-1", {"message": "hi"})
-        assert result is None
-
-        rows = db_session.query(OutboundA2ARetry).all()
-        assert len(rows) == 1
-        assert rows[0].task_type == "query"
-        assert rows[0].change_id == "change-1"
-        assert rows[0].status == "pending"
-        # See test_outbound_retry.py: last_error carries the exception TYPE, not
-        # its message, so a transport failure cannot leak the resolved host or a
-        # token prefix into the retry-queue view (CWE-209).
-        assert rows[0].last_error == "RuntimeError"
-        assert "connection reset" not in (rows[0].last_error or "")
-        assert rows[0].next_retry_at is not None
-
-    def test_auth_failure_enqueues_retry_row(self, db_session, monkeypatch):
-        import app.authority_client as authority_client
-        monkeypatch.setattr(authority_client, "authenticate", lambda db: None)  # auth fails
-        _seed_settings(db_session)
-
-        result = send_task(db_session, "query", "change-1", {"message": "hi"})
-        assert result is None
-        assert db_session.query(OutboundA2ARetry).count() == 1
+def test_a_different_api_key_gets_its_own_token(monkeypatch):
+    posts = _fake_post(monkeypatch, [_jwt(900), _jwt(900)])
+    npci_client.authenticate(None)
+    monkeypatch.setattr(npci_client, "_get_api_key", lambda db, bank_org_id=None: "key-2")
+    npci_client.authenticate(None)
+    assert posts == ["key-1", "key-2"]
 
 
-class TestCircuitBreakerOnOutbound:
-    def test_open_circuit_rejects_without_calling_transport_and_enqueues_retry(
-        self, db_session, monkeypatch,
-    ):
-        from app.config import settings
-        monkeypatch.setattr(settings, "authority_cb_failure_threshold", 2)
-
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
-
-        call_count = {"n": 0}
-
-        async def _failing_send(*a, **kw):
-            call_count["n"] += 1
-            raise RuntimeError("npci down")
-
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _failing_send)
-
-        # Rebuild the hostility registry so the patched threshold takes effect.
-        from app.core.hostility import validate_at_startup
-        validate_at_startup()
-
-        # Trip the breaker.
-        send_task(db_session, "query", "c1", {"message": "1"})
-        send_task(db_session, "query", "c1", {"message": "2"})
-        assert call_count["n"] == 2
-
-        # Next call must fail via the OPEN circuit, WITHOUT calling transport again.
-        result = send_task(db_session, "query", "c1", {"message": "3"})
-        assert result is None
-        assert call_count["n"] == 2  # unchanged — breaker rejected before dispatch
-
-        # Still enqueued for retry even though the breaker (not the transport)
-        # was what rejected it — a down dependency must not silently drop mail.
-        assert db_session.query(OutboundA2ARetry).count() == 3
+def test_invalidate_forces_a_new_handshake(monkeypatch):
+    posts = _fake_post(monkeypatch, [_jwt(900), _jwt(900)])
+    npci_client.authenticate(None)
+    npci_client.invalidate_token(None)
+    npci_client.authenticate(None)
+    assert len(posts) == 2
 
 
-class TestCorrelationIdPropagation:
-    def test_explicit_correlation_id_sent_as_header(self, db_session, monkeypatch):
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
+def test_a_failed_handshake_is_not_cached(monkeypatch):
+    calls = []
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: calls.append(1) or SimpleNamespace(
+        status_code=401, text="no", json=lambda: {}))
+    assert npci_client.authenticate(None) is None and npci_client.authenticate(None) is None
+    assert len(calls) == 2
 
-        captured = {}
 
-        async def _capture_send(*a, **kw):
-            captured.update(kw)
+# ── retry ────────────────────────────────────────────────────────────────────
 
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _capture_send)
-        send_task(db_session, "query", "c1", {"message": "hi"}, correlation_id="job-abc-123")
-        assert captured["correlation_id"] == "job-abc-123"
+def _status_error(code):
+    return httpx.HTTPStatusError(
+        "boom", request=httpx.Request("POST", "http://npci"), response=httpx.Response(code))
 
-    def test_falls_back_to_active_job_correlation_id(self, db_session, monkeypatch):
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
 
-        captured = {}
+def _wire(monkeypatch, failures):
+    """send_a2a_message raises each of `failures` in turn, then succeeds."""
+    seen, delays, tokens = [], [], []
+    queue = list(failures)
 
-        async def _capture_send(*a, **kw):
-            captured.update(kw)
+    async def fake_send(**kw):
+        seen.append(kw["data"]["message_id"])
+        tokens.append(kw["auth_header"])
+        if queue:
+            raise queue.pop(0)
+        return {}
 
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _capture_send)
+    monkeypatch.setattr(npci_client, "send_a2a_message", fake_send)
+    monkeypatch.setattr(npci_client.time, "sleep", delays.append)
+    return seen, delays, tokens
 
-        with use_correlation_id("active-job-xyz"):
-            send_task(db_session, "query", "c1", {"message": "hi"})
 
-        assert captured["correlation_id"] == "active-job-xyz"
+def _send():
+    return npci_client.send_task(None, "cert_verdict_acceptance", None, {"case_ids": ["A"]})
 
-    def test_explicit_arg_wins_over_active_job_context(self, db_session, monkeypatch):
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
 
-        captured = {}
+def test_a_transient_failure_is_retried_with_the_same_message_id(monkeypatch):
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: "tok")
+    seen, delays, _ = _wire(monkeypatch, [httpx.ConnectError("refused"), _status_error(503)])
+    assert _send() == {"status": "delivered"}
+    assert len(seen) == 3 and len(set(seen)) == 1            # one message_id -> NPCI dedups
+    assert delays == [1.0, 2.0]                              # exponential backoff
 
-        async def _capture_send(*a, **kw):
-            captured.update(kw)
 
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _capture_send)
+def test_a_client_error_is_not_retried(monkeypatch):
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: "tok")
+    seen, delays, _ = _wire(monkeypatch, [_status_error(400)])
+    assert _send() is None and len(seen) == 1 and delays == []
 
-        with use_correlation_id("active-job-xyz"):
-            send_task(db_session, "query", "c1", {"message": "hi"}, correlation_id="explicit-wins")
 
-        assert captured["correlation_id"] == "explicit-wins"
+def test_retries_are_bounded(monkeypatch):
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: "tok")
+    seen, delays, _ = _wire(monkeypatch, [_status_error(503)] * 10)
+    assert _send() is None
+    assert len(seen) == npci_client._SEND_ATTEMPTS and delays == [1.0, 2.0, 4.0]
 
-    def test_enqueued_retry_carries_correlation_id_on_failure(self, db_session, monkeypatch):
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
 
-        async def _failing_send(*a, **kw):
-            raise RuntimeError("boom")
+def test_an_sdk_wrapped_network_error_is_retried(monkeypatch):
+    from a2a.client.errors import AgentCardResolutionError
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: "tok")
+    seen, delays, _ = _wire(monkeypatch, [
+        AgentCardResolutionError("Network communication error fetching agent card from http://npci: x")])
+    assert _send() == {"status": "delivered"} and len(seen) == 2
 
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _failing_send)
 
-        with use_correlation_id("job-for-retry-trace"):
-            send_task(db_session, "query", "c1", {"message": "hi"})
+def test_a_401_triggers_one_fresh_handshake(monkeypatch):
+    issued = iter(["old", "new"])
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: next(issued))
+    monkeypatch.setattr(npci_client, "invalidate_token", lambda db, bank_org_id=None: None)
+    seen, delays, tokens = _wire(monkeypatch, [_status_error(401)])
+    assert _send() == {"status": "delivered"}
+    assert tokens == ["Bearer old", "Bearer new"] and delays == []
 
-        row = db_session.query(OutboundA2ARetry).one()
-        assert row.correlation_id == "job-for-retry-trace"
 
-    def test_envelope_correlation_id_not_overridden_by_job_id(self, db_session, monkeypatch):
-        """The A2A envelope's own business correlation_id (NPCI's conversation
-        thread pointer) must reflect the resolved thread id, NOT the
-        platform-internal AgentJob id — those are two distinct concepts
-        (see authority_client._dispatch_wire's docstring)."""
-        _authenticated(monkeypatch)
-        _seed_settings(db_session)
-        db_session.add(IncomingChange(
-            id="row-1", authority_change_id="c1", title="t", correlation_id="npci-thread-999",
-        ))
-        db_session.commit()
+def test_a_second_401_is_a_real_rejection(monkeypatch):
+    monkeypatch.setattr(npci_client, "authenticate", lambda db, bank_org_id=None: "tok")
+    monkeypatch.setattr(npci_client, "invalidate_token", lambda db, bank_org_id=None: None)
+    seen, _, _ = _wire(monkeypatch, [_status_error(401)] * 5)
+    assert _send() is None and len(seen) == 2
 
-        captured = {}
 
-        async def _capture_send(*a, **kw):
-            captured.update(kw)
+# ── agent card + TLS context ─────────────────────────────────────────────────
 
-        monkeypatch.setattr("app.authority_client.send_a2a_message", _capture_send)
+def test_the_tls_context_is_built_once():
+    assert a2a_client._ssl_context() is a2a_client._ssl_context()
 
-        with use_correlation_id("job-internal-id"):
-            send_task(db_session, "query", "c1", {"message": "hi"})
 
-        # The envelope (kw["data"]) carries NPCI's thread id...
-        assert captured["data"]["correlation_id"] == "npci-thread-999"
-        # ...while the transport header carries the job's internal id.
-        assert captured["correlation_id"] == "job-internal-id"
+def test_the_agent_card_is_fetched_once_and_rebased(monkeypatch):
+    fetched = []
+    card = SimpleNamespace(supported_interfaces=[SimpleNamespace(url="http://npci_backend:8000/a2a-rpc/rpc")])
+
+    class Resolver:
+        def __init__(self, http, base_url):
+            pass
+
+        async def get_agent_card(self):
+            fetched.append(1)
+            return card
+
+    monkeypatch.setattr(a2a_client, "A2ACardResolver", Resolver)
+
+    async def twice():
+        a = await a2a_client._agent_card(None, "http://host.docker.internal:8010")
+        b = await a2a_client._agent_card(None, "http://host.docker.internal:8010")
+        return a, b
+
+    a, b = asyncio.run(twice())
+    assert a is b and len(fetched) == 1
+    assert card.supported_interfaces[0].url == "http://host.docker.internal:8010/a2a-rpc/rpc"
+
+
+def test_an_expired_card_is_fetched_again(monkeypatch):
+    fetched = []
+
+    class Resolver:
+        def __init__(self, http, base_url):
+            pass
+
+        async def get_agent_card(self):
+            fetched.append(1)
+            return SimpleNamespace(supported_interfaces=[])
+
+    monkeypatch.setattr(a2a_client, "A2ACardResolver", Resolver)
+    a2a_client._cards["http://npci"] = (time.monotonic() - 1, object())
+    asyncio.run(a2a_client._agent_card(None, "http://npci"))
+    assert len(fetched) == 1

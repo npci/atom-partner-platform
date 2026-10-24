@@ -1,11 +1,8 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Agent-run audit helpers — write and finish `agent_runs` rows.
 
 Called only by `app.agents.base.Agent.execute()`, which wraps every agent
 invocation (in-process or remote). Keeps the audit logic in one place so all
-bindings produce identical rows. Partner-side mirror of the authority backend's
+bindings produce identical rows. Partner-side mirror of the NPCI backend's
 `job_registry` create/complete/fail pattern over `agent_jobs`.
 """
 from __future__ import annotations

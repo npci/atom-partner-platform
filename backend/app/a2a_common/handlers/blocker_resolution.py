@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `blocker_resolution` — NPCI's resolution of a
 partner-reported blocker. Patches the matching blocker entry on
 `IncomingChange.blockers` (JSON list) with the resolution."""
@@ -43,7 +40,7 @@ def handle_blocker_resolution(body: TaskReceiveRequest, db: Session) -> dict:
 
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == change_id)
+        .filter(IncomingChange.npci_change_id == change_id)
         .first()
     )
     if not change:

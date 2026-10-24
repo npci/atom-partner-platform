@@ -1,12 +1,8 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // DesignPanel — renders the partner-side design document produced by the Design
 // agent for a change, with a run/re-run affordance and a .docx download.
 // Mirrors FeasibilityPanel's query/mutation/empty-state pattern; the primary
 // artifact is the markdown design document (document_markdown).
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { t } from '../strings'
 import { formatDateTime } from '../lib/datetime';
 import {
   AlertTriangle, Download, DraftingCompass, Eye, EyeOff,
@@ -104,10 +100,7 @@ export default function DesignPanel({ changeId }) {
               Design document
             </div>
             <div style={{ fontSize: 12, color: T.textSecondary }}>
-              {/* No article here: `term.authority` carries its own ("the
-                  Authority"), so "from the {label}" renders "from the the
-                  Authority". Reads correctly for a proper noun too. */}
-              No design yet. Generate a partner-side design from {t('term.authority')} documents and your PARTNER.md profile.
+              No design yet. Generate a partner-side design from the NPCI documents and your PARTNER.md profile.
             </div>
           </div>
           <Button

@@ -1,8 +1,4 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { useQuery } from '@tanstack/react-query';
-import { t } from '../strings'
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -158,7 +154,7 @@ export default function Dashboard() {
             <Inbox size={48} strokeWidth={1.2} />
           </div>
           <h3>No changes received yet</h3>
-          <p>When {t('term.authority')} publishes a change, it will appear here automatically.</p>
+          <p>When NPCI publishes a change, it will appear here automatically.</p>
         </div>
       )}
 

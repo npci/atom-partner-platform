@@ -1,9 +1,6 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """CodeAgent — produces a partner-side implementation plan + change skeleton from
-the design document + the authority's tech spec + PARTNER.md, optionally grounded in the
-partner's own indexed source code (Code RAG).
+the design document + NPCI tech spec + PARTNER.md, optionally grounded in the
+partner's own indexed source code (Code RAG, Phase 3.2).
 
 Two postures, decided per-run by whether `code_context` (retrieved repo excerpts)
 is supplied:
@@ -16,8 +13,8 @@ is supplied:
 Mirrors the design/testing agents: thin `Agent` wrapper (mock without a key) over
 a pure `build_code_plan()`. Shared plumbing lives in `app/agents/_common.py`.
 
-Still pending: whole-file generation + MR push (see backend
-code_change.py for the authority-side reference)."""
+Still pending (Phase 3.4): whole-file generation + MR push (see backend
+code_change.py for the NPCI reference)."""
 from __future__ import annotations
 
 import logging
@@ -25,7 +22,6 @@ import logging
 from app.agents import _common
 from app.agents.base import Agent
 from app.agents.prompts import load_prompt
-from app.core.domain import prompt_block
 from app.core.llm import call_llm, get_model, get_provider
 
 logger = logging.getLogger(__name__)
@@ -60,7 +56,6 @@ def build_code_plan(
     revision_summary: str | None = None,
     knowledge_context: str | None = None,
     code_context: str | None = None,
-    symbol_usage_context: str | None = None,
     api_key: str | None = None,
 ) -> dict | None:
     """Run the implementation-planning LLM call. Returns the plan dict, or None
@@ -69,12 +64,7 @@ def build_code_plan(
     `code_context` is retrieved source-code excerpts from the partner's indexed
     repo (Code RAG); when present the plan is repository-*grounded* — real paths +
     symbols — and `_meta.grounded` is set True. When absent the agent falls back
-    to the spec-grounded skeleton (best-guess paths, low confidence).
-    `symbol_usage_context` (SDLC Gap 2) is an advisory, pre-formatted block
-    listing where the design's touched components are already referenced
-    elsewhere in the repository (see rag/symbol_usage.py) — informs
-    `file_changes[].confidence` and raises `open_questions` for symbols used
-    outside the currently-planned file set."""
+    to the spec-grounded skeleton (best-guess paths, low confidence)."""
     profile_raw, frontmatter = _common.read_partner_profile()
     if not profile_raw:
         logger.warning("build_code_plan: partner profile missing")
@@ -87,14 +77,9 @@ def build_code_plan(
     if not doc_block:
         return None
 
-    # The pack block, not a literal: the system prompt is templated by
-    # load_prompt(), and a branded token HERE would ride into the model's
-    # context on every call regardless of domain — the exact half-swept
-    # failure prompts.py documents.
-    _auth = prompt_block("authority_cap", "The authority")
     parts: list[str] = [
         "PARTNER.md", "", profile_raw, "", "---", "",
-        f"{_auth} proposed change: {change_title}",
+        f"NPCI proposed change: {change_title}",
     ]
     if change_initial_prompt:
         parts.append(f"\nPO prompt: {change_initial_prompt}")
@@ -102,7 +87,7 @@ def build_code_plan(
         parts.append(f"\nEnhanced prompt: {change_enhanced_prompt}")
     if design_summary:
         parts += ["", "---", "", f"Design posture (implement against this): {design_summary}"]
-    parts += ["", "---", "", f"{_auth} change documents (baseline — version 1):", "", doc_block]
+    parts += ["", "---", "", "NPCI change documents (baseline — version 1):", "", doc_block]
     if revision_summary:
         parts += [
             "", "---", "",
@@ -139,18 +124,6 @@ def build_code_plan(
             "Remember: you do NOT have the partner's source code. Produce the "
             "implementation plan JSON per the schema in the system prompt.",
         ]
-    if symbol_usage_context and symbol_usage_context.strip():
-        parts += [
-            "", "---", "",
-            symbol_usage_context,
-            "",
-            "Before marking any file_changes entry 'high' confidence, check whether "
-            "its symbol appears above with usages OUTSIDE the files you are already "
-            "planning to change. If so, either include those files in file_changes "
-            "or raise an open_question naming the untouched consumer — a symbol "
-            "used elsewhere that your plan doesn't account for is a backward-"
-            "compatibility risk, not something to guess past.",
-        ]
     user_msg = "\n".join(parts)
 
     try:
@@ -158,7 +131,7 @@ def build_code_plan(
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
             # Plan markdown + per-file skeletons can be very large; use the model's
-            # configured 64k output budget since 32k truncated on big changes.
+            # 64k ceiling (CLAUDE.md §3.6) since 32k truncated on big changes.
             # call_llm raises on truncation.
             max_tokens=64000,
             api_key=_common.runtime_override_key(api_key),
@@ -232,7 +205,6 @@ class CodeAgent(Agent):
             revision_summary=input.get("revision_summary"),
             knowledge_context=input.get("knowledge_context"),
             code_context=input.get("code_context"),
-            symbol_usage_context=input.get("symbol_usage_context"),
             api_key=api_key,
         )
         if plan is None:

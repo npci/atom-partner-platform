@@ -1,10 +1,7 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: knowledge — manage the partner knowledge base (Document
 RAG) and (re)index change documents.
 
-KB docs (network specs, authority circulars, past kits, internal standards) are
+KB docs (UPI/IUPI specs, NPCI circulars, past kits, internal standards) are
 uploaded here, chunked + embedded into `document_chunks` (doc_category='kb'), and
 retrieved cross-change by the design/code/test agents. The change-documents index
 is also exposed so an operator can force a re-index.
@@ -16,8 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.auth import require_admin
-from app.core.errors import safe_exc
+from app.api.auth import get_current_user
 from app.database import get_db
 from app.models import IncomingChange, KnowledgeDoc, PartnerUser
 from app.rag.doc_ingest import (
@@ -39,7 +35,7 @@ class KnowledgeDocCreate(BaseModel):
 @router.post("/knowledge")
 def create_knowledge_doc(
     body: KnowledgeDocCreate,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Add a knowledge-base document + index it for retrieval."""
@@ -65,7 +61,7 @@ def create_knowledge_doc(
 
 @router.get("/knowledge")
 def list_knowledge_docs(
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """List knowledge-base documents (newest first), without their full content."""
@@ -82,7 +78,7 @@ def list_knowledge_docs(
 @router.delete("/knowledge/{kb_id}")
 def delete_knowledge_doc(
     kb_id: str,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Delete a knowledge-base document + its indexed chunks."""
@@ -98,10 +94,10 @@ def delete_knowledge_doc(
 @router.post("/changes/{change_id}/documents/index")
 def reindex_change_documents(
     change_id: str,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Force a (re)index of this change's authority documents into the Document RAG."""
+    """Force a (re)index of this change's NPCI documents into the Document RAG."""
     change = db.execute(
         select(IncomingChange).where(IncomingChange.id == change_id)
     ).scalar_one_or_none()
@@ -110,14 +106,8 @@ def reindex_change_documents(
     try:
         n = ingest_change_documents(db, change_id)
     except Exception as exc:  # noqa: BLE001
-        # Class name only. `ingest_change_documents` spans SQLAlchemy, pgvector
-        # and the Ollama HTTP client, so `str(exc)` here put a DBAPIError's
-        # `[SQL: ...]` text plus the psycopg connection string — internal host,
-        # port, DB user — into a 502 body rendered for any authenticated
-        # dashboard user (CWE-209). The full detail goes to the server log.
-        logger.exception("document indexing failed for change_id=%s", change_id)
         raise HTTPException(
             status_code=502,
-            detail=f"indexing failed — is pgvector/Ollama available? ({safe_exc(exc)})",
+            detail=f"indexing failed — is pgvector/Ollama available? ({exc})",
         )
     return {"change_id": change_id, "chunks_indexed": n}

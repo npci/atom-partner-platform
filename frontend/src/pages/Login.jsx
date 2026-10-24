@@ -1,37 +1,21 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { ShieldCheck } from 'lucide-react';
-import { t } from '../strings'
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { login } from '../services/api';
 import { useAuth } from '../context/auth';
-import { BRAND_LOGO_URL, BRAND_NAME } from '../brand';
-import { blankLoginForm, isNotEntered } from '../utils/formState';
+import bankLogo from '../assets/bank-logo.png';
 
 export default function Login() {
   const navigate = useNavigate();
   const { signIn } = useAuth();
-  // Single state object seeded from a named factory, so the "nothing typed yet"
-  // sentinel is defined in one reviewed place rather than as a bare '' beside a
-  // password field — see utils/formState.js.
-  const [credentials, setCredentials] = useState(blankLoginForm);
-  const { username, password } = credentials;
-  const setUsername = (v) => setCredentials((c) => ({ ...c, username: v }));
-  const setPassword = (v) => setCredentials((c) => ({ ...c, password: v }));
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
-    // Refuse to attempt authentication with an unfilled field, so an empty
-    // password is never transmitted as though it were a credential.
-    if (isNotEntered(username) || isNotEntered(password)) {
-      setError('Enter both your username and password.');
-      return;
-    }
     setLoading(true);
 
     try {
@@ -60,15 +44,11 @@ export default function Login() {
       <div style={{ width: '100%', maxWidth: 400 }}>
         {/* Brand mark sits above the card so the card stays a clean form. */}
         <div style={{ textAlign: 'center', marginBottom: 'var(--sp-6)' }}>
-          {BRAND_LOGO_URL ? (
-            <img src={BRAND_LOGO_URL} alt="" style={{
-              // Operator wordmarks are typically horizontal (≈ 3:1) — keep the
-              // aspect ratio; only set height so it doesn't squash.
-              height: 52, width: 'auto', display: 'block', margin: '0 auto',
-            }} />
-          ) : (
-            <div style={{ fontSize: 22, fontWeight: 600 }}>{BRAND_NAME}</div>
-          )}
+          <img src={bankLogo} alt="Bank" style={{
+            // Real logo mark is a horizontal wordmark (≈ 3:1) — keep aspect
+            // ratio; only set height so it doesn't squash.
+            height: 52, width: 'auto', display: 'block', margin: '0 auto',
+          }} />
         </div>
 
         {/* The auth card — elevated, with a thin accent cap on top. */}
@@ -85,7 +65,7 @@ export default function Login() {
               fontSize: 'var(--fs-h1)', fontWeight: 'var(--fw-bold)',
               color: 'var(--text-strong)', marginBottom: 4,
             }}>
-              {t('term.authorityCap')} Partner Platform
+              NPCI Partner Platform
             </h1>
             <p style={{
               fontSize: 'var(--fs-meta)', color: 'var(--text-muted)',
@@ -153,7 +133,7 @@ export default function Login() {
           fontSize: 'var(--fs-micro)', color: 'var(--text-muted)',
         }}>
           <ShieldCheck size={13} />
-          Secured workspace · {t('term.authorityOrg')}
+          Secured workspace · NPCI UPI Change Management
         </div>
       </div>
     </div>

@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Shared builder for the two review agents (code_reviewer + security_reviewer).
 
 Both run the identical shape — generated files in, strict-JSON findings out — and
@@ -17,7 +14,6 @@ Findings contract (per the review loop, "any finding blocks"):
 import logging
 import time
 
-from app.core.domain import prompt_block
 from app.core.llm import call_llm, get_model, get_provider
 
 from ._common import (
@@ -66,16 +62,7 @@ def sanitize_findings(obj):
     malformed findings rather than rejecting the whole review (one odd finding
     must not abort the loop). Returns the cleaned dict, or None if the output
     isn't a usable findings object (no dict / no findings list — which we treat
-    as invalid, NOT as 'clean', so broken code can't slip through).
-
-    Each finding is
-    given `root_cause` and `principle_ref` fields (defaulted to None when the
-    model didn't populate them — see the reviewer prompts' instructions to
-    fill these in) so a finding carries a causal explanation and a citation
-    back to the governing principle it violates, not just a symptom
-    description. Never REJECTS a finding for lacking these — that would
-    regress the "one odd finding must not abort the loop" guarantee above;
-    they are additive, best-effort enrichment."""
+    as invalid, NOT as 'clean', so broken code can't slip through)."""
     if not isinstance(obj, dict):
         return None
     raw = obj.get("findings")
@@ -89,8 +76,6 @@ def sanitize_findings(obj):
             continue  # nothing actionable
         sev = (f.get("severity") or "").strip().lower()
         f["severity"] = sev if sev in VALID_SEVERITIES else "medium"
-        f.setdefault("root_cause", None)
-        f.setdefault("principle_ref", None)
         clean.append(f)
     obj["findings"] = clean
     return obj
@@ -138,9 +123,7 @@ def build_review(
         sections.append(f"# Design posture\n{design_summary}")
     for d in (documents or [])[:6]:
         dt = d.get("doc_type") or "doc"
-        sections.append(
-            f"# {prompt_block('authority_cap', 'Authority')} {dt}\n"
-            f"{(d.get('content') or '')[:6000]}")
+        sections.append(f"# NPCI {dt}\n{(d.get('content') or '')[:6000]}")
     if code_context:
         sections.append(f"# Existing repository excerpts (for grounding)\n{code_context}")
     sections.append(
@@ -160,7 +143,7 @@ def build_review(
                 api_key=runtime_override_key(api_key),
             )
         except Exception as e:  # noqa: BLE001 — transient provider/truncation error
-            last_reason = f"LLM error: {type(e).__name__}"  # type only — CWE-209
+            last_reason = f"LLM error: {e}"
             logger.warning("%s review attempt %d/%d failed", lens, attempt, _MAX_ATTEMPTS, exc_info=True)
             if attempt < _MAX_ATTEMPTS:
                 time.sleep(_RETRY_BACKOFF_S * attempt)

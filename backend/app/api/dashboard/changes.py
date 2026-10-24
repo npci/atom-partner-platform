@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: changes — the inbox, change detail, and document downloads."""
 import logging
 import re
@@ -45,7 +42,7 @@ def list_changes(user: PartnerUser = Depends(get_current_user), db: Session = De
     return [
         {
             "id":             c.id,
-            "authority_change_id": c.authority_change_id,
+            "npci_change_id": c.npci_change_id,
             "title":          c.title,
             "status":         c.status,
             "decision":       c.decision or "pending",
@@ -94,7 +91,7 @@ def get_change(
 
     return {
         "id": change.id,
-        "authority_change_id": change.authority_change_id,
+        "npci_change_id": change.npci_change_id,
         "title": change.title,
         "initial_prompt": change.initial_prompt,
         "enhanced_prompt": change.enhanced_prompt,
@@ -107,18 +104,18 @@ def get_change(
         "cert_status":         change.cert_status,
         "cert_status_history": _safe_json(change.cert_status_history) or {},
         "cert_summary":        _safe_json(change.cert_summary),
-        "authority_counter": _safe_json(change.authority_counter),
-        "authority_counter_history": _safe_json(change.authority_counter_history) or [],
+        "npci_counter": _safe_json(change.npci_counter),
+        "npci_counter_history": _safe_json(change.npci_counter_history) or [],
         "counter_decisions": _safe_json(change.counter_decisions) or [],
-        # Follow-up authority replies to already-answered general questions —
-        # rendered as extra authority bubbles so a second reply doesn't
+        # Follow-up NPCI replies to already-answered general questions —
+        # rendered as extra NPCI bubbles so a second reply doesn't
         # overwrite the first in the partner timeline.
-        "authority_followups": _safe_json(change.authority_followups) or [],
-        # Authority round-lifecycle notices (PM force-closed a round) — shown
+        "npci_followups": _safe_json(change.npci_followups) or [],
+        # NPCI round-lifecycle notices (PM force-closed a round) — shown
         # in the Negotiation tab so the partner sees the window shut.
         "round_notices": _safe_json(change.round_notices) or [],
         "blockers": _safe_json(change.blockers) or [],
-        # Post-freeze emergency issues raised to the authority. The button
+        # Post-freeze emergency issues raised to NPCI (Slice 5). The button
         # that creates these is gated on negotiation_version >= 3 in the UI.
         "emergency_issues": _safe_json(getattr(change, "emergency_issues", None)) or [],
         "received_at": change.received_at.isoformat() if change.received_at else None,
@@ -126,11 +123,11 @@ def get_change(
         # the document version switcher. Without these the banner never renders.
         "negotiation_version":          change.negotiation_version,
         "negotiation_version_accepted": change.negotiation_version_accepted,
-        # Set when the authority freezes the negotiation (round cap reached). Drives the
+        # Set when NPCI freezes the negotiation (round cap reached). Drives the
         # partner-side frozen UI — a round-based freeze may not bump the version.
         "negotiation_finalized_at":     getattr(change, "negotiation_finalized_at", None),
-        "authority_change_summary":          getattr(change, "authority_change_summary", None),
-        # Query hold — true while the authority prepares a revised kit (round closed →
+        "npci_change_summary":          getattr(change, "npci_change_summary", None),
+        # Query hold — true while NPCI prepares a revised kit (round closed →
         # ship). The UI freezes the composer and shows a hold banner.
         "revision_in_progress":         bool(getattr(change, "revision_in_progress", False)),
         "revision_target_version":      getattr(change, "revision_target_version", None),
@@ -144,22 +141,22 @@ def get_change(
                 "negotiation_version": d.negotiation_version or 1,
                 # Surface format availability so the UI shows the right
                 # download buttons. .docx is always available — we
-                # synthesise it from the markdown content if the authority didn't
+                # synthesise it from the markdown content if NPCI didn't
                 # ship bytes. .pptx is only meaningful for product_deck
-                # (matching the authority's behaviour).
+                # (matching NPCI's behaviour).
                 "has_docx":      True if (d.docx_bytes or d.content) else False,
                 "docx_filename": d.docx_filename,
                 "has_pptx":      bool(d.pptx_bytes) or d.doc_type == "product_deck",
                 "pptx_filename": d.pptx_filename,
                 # .xlsx is only meaningful for cert_test_cases and is
-                # only servable when the authority shipped the exact workbook
+                # only servable when NPCI shipped the exact workbook
                 # bytes over A2A (excel_testcase_engine output).
                 "has_xlsx":      bool(d.xlsx_bytes),
                 "xlsx_filename": d.xlsx_filename,
-                # .mp4 promo/explainer video — only when the authority shipped the bytes.
+                # .mp4 promo/explainer video — only when NPCI shipped the bytes.
                 "has_video":     bool(d.video_bytes),
                 "video_filename": d.video_filename,
-                # .zip multi-schema XSD bundle — only when the authority shipped a change
+                # .zip multi-schema XSD bundle — only when NPCI shipped a change
                 # touching ≥2 .xsd files. Drives the "Download all schemas" button.
                 "has_zip":       bool(d.zip_bytes),
                 "zip_filename":  d.zip_filename,
@@ -219,21 +216,21 @@ def download_change_document(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the `.docx` rendition the authority sent over A2A back to the
+    """Stream the `.docx` rendition NPCI sent over A2A back to the
     operator's browser.
 
     Bytes are stored in `change_documents.docx_bytes` (BLOB). 404 if the
     doc has no docx attachment. Filename comes from the column populated
     at ingest time; falls back to a synthetic `<doc_type>_v<n>.docx` if
-    the authority omitted it.
+    NPCI omitted it.
     """
     doc = db.get(ChangeDocument, doc_id)
     if not doc or doc.change_id != change_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Prefer the binary the authority shipped over A2A. Fall back to on-the-fly
+    # Prefer the binary NPCI shipped over A2A. Fall back to on-the-fly
     # synthesis from the stored markdown content so every doc is
-    # downloadable in .docx, matching what the authority's portal advertises.
+    # downloadable in .docx, matching what the NPCI portal advertises.
     if doc.docx_bytes:
         body  = doc.docx_bytes
         fname = doc.docx_filename or f"{doc.doc_type}_v{doc.version}.docx"
@@ -261,7 +258,7 @@ def get_change_document_video(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the promo/explainer `.mp4` the authority shipped with the kit (inline, so
+    """Stream the promo/explainer `.mp4` NPCI shipped with the kit (inline, so
     the UI can play it in a <video> tag and offer download). 404 if none."""
     doc = db.get(ChangeDocument, doc_id)
     if not doc or doc.change_id != change_id:
@@ -282,11 +279,11 @@ def download_change_summary(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the authority's "Summary of Changes" for this kit version as a .docx."""
+    """Stream NPCI's "Summary of Changes" for this kit version as a .docx."""
     change = db.get(IncomingChange, change_id)
     if not change:
         raise HTTPException(status_code=404, detail="Change not found")
-    summary = (getattr(change, "authority_change_summary", None) or "").strip()
+    summary = (getattr(change, "npci_change_summary", None) or "").strip()
     if not summary:
         raise HTTPException(status_code=404, detail="No change summary for this change")
     ver = change.negotiation_version or 1
@@ -317,7 +314,7 @@ def download_change_document_pptx(
     if not doc or doc.change_id != change_id:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # .pptx is only meaningful for deck-style doc types. Match the authority's
+    # .pptx is only meaningful for deck-style doc types. Match NPCI's
     # behaviour: shipped only for `product_deck`. Other types get a 404.
     if doc.doc_type != "product_deck" and not doc.pptx_bytes:
         raise HTTPException(status_code=404, detail="No .pptx for this document type")
@@ -348,7 +345,7 @@ def download_cert_signoff(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the Certification Result certificate (.docx) the authority shipped
+    """Stream the NPCI Certification Result certificate (.docx) NPCI shipped
     on the all-PASS `cert_completion_signoff` A2A task.
 
     Bytes live on `incoming_changes.cert_signoff_docx_bytes` (BLOB),
@@ -361,13 +358,7 @@ def download_cert_signoff(
     if not change.cert_signoff_docx_bytes:
         raise HTTPException(status_code=404, detail="No certification sign-off for this change")
 
-    # The authority's own filename wins when it sent one; the fallback is
-    # pack-derived rather than a literal, so a deployment in another domain
-    # whose authority shipped no name does not download someone else's brand.
-    from app.core.domain import get_active_pack
-
-    fname = change.cert_signoff_filename or (
-        f"{get_active_pack().signoff.document_prefix()}_Result_{change_id}.docx")
+    fname = change.cert_signoff_filename or f"NPCI_Certification_Result_{change_id}.docx"
     return Response(
         content=change.cert_signoff_docx_bytes,
         media_type=(
@@ -386,12 +377,12 @@ def download_change_document_xlsx(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the cert_test_cases `.xlsx` workbook the authority shipped over A2A.
+    """Stream the cert_test_cases `.xlsx` workbook NPCI shipped over A2A.
 
     Bytes live in `change_documents.xlsx_bytes` (BLOB), populated by
     `partner_handlers.handle_change_communication` from the inbound
     `xlsx_b64` field. The partner serves the bytes verbatim so the
-    workbook is byte-identical to what the authority's own download endpoint
+    workbook is byte-identical to what NPCI's own download endpoint
     serves (Index / Summary / Modes / archetype sheets, validation
     patches, etc.).
     """
@@ -421,7 +412,7 @@ def download_change_document_zip(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Stream the multi-schema XSD `.zip` the authority shipped over A2A.
+    """Stream the multi-schema XSD `.zip` NPCI shipped over A2A.
 
     Bytes live in `change_documents.zip_bytes` (BLOB), populated from the
     inbound `xsd_zip_b64` when a change touches ≥2 `.xsd` files. The native
@@ -443,7 +434,7 @@ def download_change_document_zip(
 
 
 # Artifacts whose single canonical download format is raw text carried in
-# `content` (the authority ships it as a markdown-fenced block). doc_type -> (extension,
+# `content` (NPCI ships it as a markdown-fenced block). doc_type -> (extension,
 # media_type, fence languages to look for).
 _NATIVE_FORMATS = {
     "manifest":          ("yaml", "application/x-yaml", ("yaml", "yml")),
@@ -453,7 +444,7 @@ _NATIVE_FORMATS = {
 
 
 def _extract_fenced(content: str, langs: tuple[str, ...]) -> str:
-    """Pull the raw artifact out of the authority's markdown-fenced content. The kit
+    """Pull the raw artifact out of NPCI's markdown-fenced content. The kit
     ships e.g. the manifest as a ```yaml block (sometimes preceded by a prose
     summary, as the xsd doc is) — we want just the fenced block, not the fence
     markers or the surrounding markdown. Falls back to the whole content when

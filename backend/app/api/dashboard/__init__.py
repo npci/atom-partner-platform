@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Partner Dashboard API — internal endpoints for the partner UI.
 
 Split per domain (WS5) from the original 1399-line module. Each submodule owns
@@ -10,7 +7,6 @@ one domain's routes; this package re-exports a single aggregate `router` so
 from fastapi import APIRouter
 
 from . import (
-    cert_fix,
     certification,
     changes,
     code,
@@ -18,10 +14,10 @@ from . import (
     decision,
     defects,
     design,
-    domain,
     drafts,
     jobs,
     knowledge,
+    npci_status,
     profile,
     progress,
     queries,
@@ -30,7 +26,7 @@ from . import (
 )
 
 router = APIRouter()
-for _module in (changes, queries, decision, defects, drafts, progress, certification, cert_fix, settings, design, testing, code, knowledge, code_repo, jobs, profile, domain):
+for _module in (changes, queries, decision, defects, drafts, progress, certification, settings, design, testing, code, knowledge, code_repo, jobs, profile, npci_status):
     router.include_router(_module.router)
 
 __all__ = ["router"]

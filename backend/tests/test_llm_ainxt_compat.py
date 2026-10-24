@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """AiNxt compat-mode toggle (Phase 1): LLM_PROVIDER=ainxt routes to the Anthropic
 /v1/messages path when AINXT_COMPAT_MODE=anthropic, else the OpenAI /chat/completions
 path. Mirrors the NPCI backend's ainxt_compat_mode switch.
@@ -8,74 +5,10 @@ path. Mirrors the NPCI backend's ainxt_compat_mode switch.
 Fakes stand in for the provider clients, recording which route ran + the model used,
 so no network or real SDK call happens.
 """
-from types import SimpleNamespace
-
 import pytest
 
 from app.config import settings
 from app.core import llm
-
-
-def test_provider_names_are_canonical_and_validated():
-    assert llm.normalize_provider("claude") == "anthropic"
-    assert llm.normalize_provider("anthropic") == "anthropic"
-    with pytest.raises(ValueError, match="Unknown LLM provider"):
-        llm.normalize_provider("opena1")
-
-
-def test_runtime_key_uses_active_provider_db_value(monkeypatch):
-    monkeypatch.setattr(settings, "llm_provider", "openai")
-    db = SimpleNamespace(get=lambda _model, key: SimpleNamespace(value="db-openai")
-                         if key == "partner_openai_api_key" else None)
-    assert llm.resolve_runtime_api_key(db) == "db-openai"
-
-
-def test_runtime_key_is_decrypted(monkeypatch):
-    """The stored row is ciphertext, and the caller needs a usable key.
-
-    `api/dashboard/settings.py::_upsert` encrypts every SECRET_KEYS member on
-    write, and all three provider key names are in that set. This resolver
-    returned `row.value` verbatim, so every key pasted into the Settings UI
-    reached the SDK as `enc:v1:...` and 401'd — on ALL providers, presenting as
-    a provider outage rather than a config bug.
-
-    The test above could not catch it: its stub row is plaintext and decrypt()
-    is a no-op on plaintext, so it passed either way. This one stores real
-    ciphertext.
-    """
-    import base64
-    import secrets as _secrets
-
-    from app.core import secret_box
-
-    monkeypatch.setenv(
-        "PARTNER_SECRET_KEK",
-        base64.b64encode(_secrets.token_bytes(32)).decode(),
-    )
-    stored = secret_box.encrypt("sk-real-key")
-    assert secret_box.is_encrypted(stored), "fixture must be genuinely encrypted"
-
-    monkeypatch.setattr(settings, "llm_provider", "anthropic")
-    db = SimpleNamespace(
-        get=lambda _model, key: SimpleNamespace(value=stored)
-        if key == "partner_anthropic_api_key" else None)
-
-    assert llm.resolve_runtime_api_key(db) == "sk-real-key"
-
-
-def test_undecryptable_runtime_key_falls_back_to_env(monkeypatch):
-    """A corrupted row must not take the agent down, and must not be returned.
-
-    Treating it as unconfigured lets the env-level key still serve; raising
-    would fail every LLM call over one bad row the caller can route around.
-    """
-    monkeypatch.setattr(settings, "llm_provider", "anthropic")
-    monkeypatch.setattr(settings, "partner_anthropic_api_key", "env-key")
-    db = SimpleNamespace(
-        get=lambda _model, key: SimpleNamespace(value="enc:v1:not-real-ciphertext")
-        if key == "partner_anthropic_api_key" else None)
-
-    assert llm.resolve_runtime_api_key(db) == "env-key"
 
 
 # ── Fake clients ─────────────────────────────────────────────────────────────
@@ -96,8 +29,7 @@ class _FakeStream:
 
 
 class _FakeAnthropic:
-    """Matches the .messages.stream(...).get_final_message() shape
-    _call_anthropic_messages uses."""
+    """Matches the .messages.stream(...).get_final_message() shape _call_claude uses."""
     def __init__(self, rec):
         self._rec = rec
         self.messages = self

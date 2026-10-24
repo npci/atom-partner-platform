@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Regression harness for the dashboard router (WS5 safety net).
 
 Proves the per-domain split is behavior-preserving:
@@ -53,60 +50,18 @@ EXPECTED_ROUTES = {
 
 
 def _dashboard_route_set() -> set[str]:
-    """Flatten every concrete route reachable from the dashboard router.
-
-    This walks recursively rather than iterating `router.routes` directly.
-    As of FastAPI 0.141.1 (the version pinned in requirements.txt),
-    `include_router()` no longer splices the child's `Route` objects into the
-    parent's list — it appends one opaque `_IncludedRouter` wrapper per
-    included router, which exposes neither `.path` nor `.methods` and holds
-    the real routes behind `.original_router`. A flat scan therefore sees 15
-    wrappers and zero paths, making this guard silently vacuous: it would
-    report "no routes lost" no matter what was deleted.
-
-    Recursing through `.original_router` (and `.routes`, for the older shape)
-    restores the guarantee and works on both layouts.
-    """
     from app.api.dashboard import router
-
-    out: set[str] = set()
-    seen: set[int] = set()
-
-    def _walk(node) -> None:
-        if id(node) in seen:  # defensive: cyclic include would otherwise hang
-            return
-        seen.add(id(node))
-
-        path, methods = getattr(node, "path", None), getattr(node, "methods", None)
-        if path and methods:
-            out.update(f"{m} {path}" for m in methods if m != "HEAD")
-
-        inner = getattr(node, "original_router", None)
-        if inner is not None:
-            _walk(inner)
-        for child in getattr(node, "routes", []) or []:
-            _walk(child)
-
-    _walk(router)
+    out = set()
+    for r in router.routes:
+        for m in getattr(r, "methods", []):
+            if m == "HEAD":
+                continue
+            out.add(f"{m} {r.path}")
     return out
 
 
-def test_no_dashboard_route_from_the_split_was_lost():
-    """The WS5 baseline is a FLOOR, not an exact match.
-
-    What this harness exists to catch is a route dropped, renamed or
-    mis-prefixed by the per-domain split (see the module docstring). Equality
-    also fails on every route ADDED since, and ~30 have been — none of the
-    frozen 24 were removed. Asserting equality therefore turned a real
-    regression guard into a chore that fires on ordinary feature work, which is
-    how it ended up red.
-
-    Subset keeps the guarantee that matters and cannot rot. It deliberately
-    does NOT alert on new routes: reviewing new endpoints is a code-review job,
-    and pretending a stale frozen list does it was the original mistake.
-    """
-    missing = EXPECTED_ROUTES - _dashboard_route_set()
-    assert not missing, f"routes lost since the WS5 split: {sorted(missing)}"
+def test_dashboard_route_inventory_is_unchanged():
+    assert _dashboard_route_set() == EXPECTED_ROUTES
 
 
 @pytest.fixture()

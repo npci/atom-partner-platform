@@ -1,23 +1,18 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """LLM-driven clarification question suggester.
 
-Reads the Product Kit documents shared by the authority for a given change and asks
-the configured LLM to produce 3-7 specific clarification questions a network
-participant should ask the authority before implementing the change.
+Reads the Product Kit documents shared by NPCI for a given change and asks the
+configured LLM to produce 3-7 specific clarification questions a UPI ecosystem
+partner should ask NPCI before implementing the change.
 
-Provider switches via `LLM_PROVIDER` env (anthropic / openai / ainxt) — see
-`app.core.llm` for the routing layer. This module used to call Anthropic
-directly; it now goes through `call_llm` so the partner stack picks up
-OpenAI or the AiNxt internal gateway when configured.
+Provider switches via `LLM_PROVIDER` env (claude / openai / ainxt) — see
+`app.core.llm` for the routing layer. Pre-Slice-llm-routing this module
+called Anthropic directly; now it goes through `call_llm` so the partner
+stack picks up OpenAI or the AiNxt internal gateway when configured.
 """
 import json
 import logging
-from string import Template
 
 from app.config import settings as _settings
-from app.core.domain import get_active_pack
 from app.core.llm import call_llm, get_model, get_provider
 
 logger = logging.getLogger(__name__)
@@ -26,16 +21,16 @@ MAX_DOC_CHARS = 15000  # per-document cap to keep context bounded
 MAX_TOTAL_CHARS = 60000  # hard cap across all docs
 
 
-_SYSTEM_TEMPLATE = """You are the technical lead of $partner_descriptor reviewing
-change documentation shared by $authority. Your job is to produce a short list of clarification
-questions the partner should ask $authority BEFORE starting implementation.
+SYSTEM_PROMPT = """You are the technical lead of a UPI ecosystem partner (a bank or PSP) reviewing
+change documentation shared by NPCI. Your job is to produce a short list of clarification
+questions the partner should ask NPCI BEFORE starting implementation.
 
 Focus on items a partner genuinely needs answered to build safely and on time:
 - API / integration contracts (endpoint semantics, field formats, error codes, retry policy)
 - Edge cases and failure modes (timeouts, partial failures, rollback, idempotency)
 - Operational parameters (limits, thresholds, go-live dates, sunset of prior behaviour)
-- Compliance / regulatory implications (applicable regulator, identity checks, consent, audit trail)
-- Cross-system dependencies (other participants and the roles they play)
+- Compliance / regulatory implications (RBI, KYC, consent, audit trail)
+- Cross-system dependencies (PSPs, banks, issuer/acquirer roles)
 - Ambiguous or under-specified statements in the shared documents
 
 Rules:
@@ -47,20 +42,6 @@ Rules:
 - Avoid generic filler ("Any more details?", "Please clarify.").
 - Do not ask questions already answered by the shared documents.
 """
-
-
-def _system_prompt() -> str:
-    """Interpolate the template with the active pack's vocabulary.
-
-    A function rather than a module constant: a constant would freeze whichever
-    pack was active at import, which is invisible in production and wrong in
-    any test that switches packs. `safe_substitute` leaves an unknown
-    placeholder as literal `$name` rather than raising, so a pack missing a
-    block yields a visibly odd prompt instead of a 500 mid-run.
-    """
-    return Template(_SYSTEM_TEMPLATE).safe_substitute(
-        **get_active_pack().prompt_blocks()
-    )
 
 
 def _truncate_docs(documents: list[dict]) -> str:
@@ -120,7 +101,7 @@ def suggest_questions(
     `api_key` is retained for back-compat with the existing call site
     (which reads `partner_anthropic_api_key` from `partner_settings`).
     It's only used today as a "is the partner allowed to use AI?"
-    gate when the configured provider is `anthropic` AND the env-level
+    gate when the configured provider is `claude` AND the env-level
     key is empty — covers the dev flow where a per-partner key is
     pasted in the Settings UI rather than baked into the env.
     For openai/ainxt providers it's ignored; those keys come from env.
@@ -130,14 +111,14 @@ def suggest_questions(
     # Key resolution mirrors the existing dashboard flow: when the
     # caller passed an `api_key` (read from `partner_settings` /
     # settings.partner_anthropic_api_key) AND the active provider is
-    # anthropic, override for this single call. For openai/ainxt the
+    # claude, override for this single call. For openai/ainxt the
     # env-level key is the source today (extend the Settings UI to
     # store those if/when runtime override is needed). When neither
     # the runtime override nor env key is configured for the active
     # provider, bail with a warn rather than letting the cached
     # client builder raise downstream.
     runtime_override: str | None = None
-    if provider == "anthropic":
+    if provider == "claude":
         if api_key:
             runtime_override = api_key
         elif not _settings.partner_anthropic_api_key:
@@ -172,7 +153,7 @@ def suggest_questions(
 
     try:
         text = call_llm(
-            system=_system_prompt(),
+            system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
             max_tokens=1500,
             api_key=runtime_override,

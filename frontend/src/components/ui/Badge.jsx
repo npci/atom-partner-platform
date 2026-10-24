@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // Badge — status/label chip. Composes the token-based .badge classes in
 // index.css. Pairs an optional icon with the label so status is never
 // conveyed by colour alone (accessibility). Replaces the four hand-rolled

@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `round_opened`.
 
 NPCI→bank per-partner notice that a negotiation round has opened. The partner
@@ -26,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 def handle_round_opened(body: TaskReceiveRequest, db: Session) -> dict:
     payload = body.payload or {}
-    authority_change_id = payload.get("change_id", body.change_id or "")
+    npci_change_id = payload.get("change_id", body.change_id or "")
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == authority_change_id)
+        .filter(IncomingChange.npci_change_id == npci_change_id)
         .first()
     )
     if not change:
@@ -50,7 +47,7 @@ def handle_round_opened(body: TaskReceiveRequest, db: Session) -> dict:
     _reason_text = {
         "initial_ack":            f"Round {round_number} of {max_rounds or '?'} is now open. Respond by {deadline_at or 'the round deadline'}.",
         "version_ship":           f"A new kit version has shipped — round {round_number} of {max_rounds or '?'} is now open. Respond by {deadline_at or 'the round deadline'}.",
-        "pm_advance_no_change":   f"The authority's PM has opened round {round_number} of {max_rounds or '?'}. Respond by {deadline_at or 'the round deadline'}.",
+        "pm_advance_no_change":   f"NPCI's PM has opened round {round_number} of {max_rounds or '?'}. Respond by {deadline_at or 'the round deadline'}.",
         "silent_advance":         f"Round {round_number} of {max_rounds or '?'} is now open (auto-advanced). Respond by {deadline_at or 'the round deadline'}.",
     }.get(opened_reason, f"Round {round_number} of {max_rounds or '?'} is now open.")
 

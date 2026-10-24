@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Code-quality reviewer agent — one of the two lenses in the review step.
 
 Reviews the generated whole-file change set for correctness, bugs, and needless

@@ -1,10 +1,7 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: decision — rollout accept / counter-propose / counter-accept.
 
 These emit the rollout-contract A2A messages (PROPOSAL_ACCEPTANCE,
-COUNTER_PROPOSAL, COUNTER_DECISION) and maintain the authority_counter audit trail.
+COUNTER_PROPOSAL, COUNTER_DECISION) and maintain the npci_counter audit trail.
 """
 import json
 import logging
@@ -18,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import get_current_user
 from app.database import get_db
 from app.models import IncomingChange, OutgoingQuery, PartnerUser
-from app.authority_client import send_counter_decision, send_counter_proposal, send_proposal_acceptance
+from app.npci_client import send_counter_decision, send_counter_proposal, send_proposal_acceptance
 
 from .changes import get_change
 
@@ -26,14 +23,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
 
-def _archive_authority_counter(change, resolution: str, response_text: str = "") -> None:
-    """Append the current `authority_counter` snapshot to `authority_counter_history`
+def _archive_npci_counter(change, resolution: str, response_text: str = "") -> None:
+    """Append the current `npci_counter` snapshot to `npci_counter_history`
     with how the partner resolved it, then clear the active slot.
 
-    Call BEFORE setting `change.authority_counter = None`. No-op if there's
+    Call BEFORE setting `change.npci_counter = None`. No-op if there's
     no active counter to archive. `resolution` is one of:
       'countered'         — partner sent their own counter back
-      'accepted'          — partner explicitly accepted the authority's counter
+      'accepted'          — partner explicitly accepted NPCI's counter
                             via /counter-proposals/{cp_id}/accept; rollout
                             decision is NOT advanced (partner still needs
                             to explicitly accept the rollout afterward)
@@ -44,10 +41,10 @@ def _archive_authority_counter(change, resolution: str, response_text: str = "")
                             rollout-accept silently archived the counter as
                             accepted. New writes use 'superseded'.
     """
-    if not change.authority_counter:
+    if not change.npci_counter:
         return
     try:
-        snapshot = json.loads(change.authority_counter)
+        snapshot = json.loads(change.npci_counter)
     except (json.JSONDecodeError, TypeError):
         return
     snapshot["status"] = "responded"
@@ -56,15 +53,15 @@ def _archive_authority_counter(change, resolution: str, response_text: str = "")
     snapshot["resolved_at"] = datetime.now(timezone.utc).isoformat()
 
     history: list = []
-    if change.authority_counter_history:
+    if change.npci_counter_history:
         try:
-            existing = json.loads(change.authority_counter_history)
+            existing = json.loads(change.npci_counter_history)
             if isinstance(existing, list):
                 history = existing
         except (json.JSONDecodeError, TypeError):
             pass
     history.append(snapshot)
-    change.authority_counter_history = json.dumps(history)
+    change.npci_counter_history = json.dumps(history)
 
 
 class AcceptChangeRequest(BaseModel):
@@ -102,32 +99,32 @@ def accept_change(
     }
 
     # The kit_id we received is per-doc on the inbound; we don't store it
-    # explicitly today, so derive it from authority_change_id (matches the
-    # authority convention `CHG_<change_id>`).
-    kit_id = f"CHG_{change.authority_change_id}"
+    # explicitly today, so derive it from npci_change_id (matches the
+    # NPCI convention `CHG_<change_id>`).
+    kit_id = f"CHG_{change.npci_change_id}"
 
     result = send_proposal_acceptance(
-        db, change.authority_change_id, kit_id,
+        db, change.npci_change_id, kit_id,
         accepted_by=accepted_by,
         internal_change_advisory_ref=body.internal_change_advisory_ref,
         estimated_phase_timeline=body.estimated_phase_timeline,
         implementation_kickoff_date=body.implementation_kickoff_date,
     )
     if not result:
-        raise HTTPException(status_code=502, detail="Failed to deliver acceptance to the authority")
+        raise HTTPException(status_code=502, detail="Failed to deliver acceptance to NPCI")
 
     change.decision = "accepted"
-    # Partner accepted the rollout on the original terms — any open authority
+    # Partner accepted the rollout on the original terms — any open NPCI
     # counter is now moot (its terms didn't take effect). Archive with
     # resolution="superseded" rather than "accepted" so the audit trail
     # doesn't read as an implicit counter acceptance. The frontend warns
     # the partner before this state transition.
-    _archive_authority_counter(
+    _archive_npci_counter(
         change,
         resolution="superseded",
         response_text="Counter superseded — rollout accepted on the original terms",
     )
-    change.authority_counter = None
+    change.npci_counter = None
     db.commit()
 
     logger.info("Change accepted: change=%s by=%s", change_id, user.username)
@@ -155,16 +152,16 @@ def counter_propose(
     db: Session = Depends(get_db),
 ):
     """Partner sends a counter-proposal. Routed via the QUERY transport
-    so the authority's existing negotiation thread + AI-draft response pipeline
+    so NPCI's existing negotiation thread + AI-draft response pipeline
     handles it; the `message_kind: COUNTER_PROPOSAL` discriminator on
-    the payload tells the authority it's a counter, not a clarifying question."""
+    the payload tells NPCI it's a counter, not a clarifying question."""
     change = db.get(IncomingChange, change_id)
     if not change:
         raise HTTPException(status_code=404, detail="Change not found")
     if getattr(change, "revision_in_progress", False):
         raise HTTPException(
             status_code=409,
-            detail="The authority is preparing a revised kit — counter-proposals are on hold until the new version ships.",
+            detail="NPCI is preparing a revised kit — counter-proposals are on hold until the new version ships.",
         )
     if change.decision == "accepted":
         raise HTTPException(status_code=400, detail="Already accepted; cannot counter-propose")
@@ -172,23 +169,23 @@ def counter_propose(
         raise HTTPException(status_code=400, detail="Justification cannot be empty")
 
     counter_proposal_id = f"counter-{uuid4().hex[:12]}"
-    kit_id = f"CHG_{change.authority_change_id}"
+    kit_id = f"CHG_{change.npci_change_id}"
 
     import json as _json
     result = send_counter_proposal(
-        db, change.authority_change_id, kit_id,
+        db, change.npci_change_id, kit_id,
         counter_proposal_id=counter_proposal_id,
         justification=body.justification,
         request_category=body.request_category,
         request_payload=body.request_payload,
     )
     if not result:
-        raise HTTPException(status_code=502, detail="Failed to deliver counter-proposal to the authority")
+        raise HTTPException(status_code=502, detail="Failed to deliver counter-proposal to NPCI")
 
     # Mirror the local thread so the partner sees their own message in
     # Activity. kind='negotiation' tags the row so the partner UI's
     # events-builder routes the bubble to the Negotiation tab instead
-    # of General. The authority side already sees this as a NegotiationMessage
+    # of General. The NPCI side already sees this as a NegotiationMessage
     # with role='counter_proposal' (from process_counter_proposal), which
     # the npciTabOf categorizer maps to its Negotiation tab.
     db.add(OutgoingQuery(
@@ -201,15 +198,15 @@ def counter_propose(
     ))
 
     change.decision = "negotiating"
-    # Partner has now responded to the authority's prior counter (if any).
+    # Partner has now responded to NPCI's prior counter (if any).
     # Archive its snapshot first so the chat timeline keeps showing it,
     # then clear the active slot so the "needs action" card disappears.
-    _archive_authority_counter(
+    _archive_npci_counter(
         change,
         resolution="countered",
         response_text=body.justification,
     )
-    change.authority_counter = None
+    change.npci_counter = None
     db.commit()
 
     logger.info("Counter-proposal sent: change=%s by=%s id=%s", change_id, user.username, counter_proposal_id)
@@ -228,13 +225,13 @@ def accept_counter_proposal(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Partner accepts a specific authority-originated counter — resolves
+    """Partner accepts a specific NPCI-originated counter — resolves
     just that negotiation thread. Distinct from `/accept` (which is
     the rollout-level acceptance and emits PROPOSAL_ACCEPTANCE).
 
-    On success: archives the active `authority_counter` with
+    On success: archives the active `npci_counter` with
     `resolution='accepted'` and emits a COUNTER_DECISION (decision=ACCEPT)
-    over A2A so the authority flips its CounterProposal row to ACCEPTED. The
+    over A2A so NPCI flips its CounterProposal row to ACCEPTED. The
     rollout decision (`change.decision`) is intentionally NOT modified;
     partner must click Accept rollout separately.
     """
@@ -245,12 +242,12 @@ def accept_counter_proposal(
     change = db.get(IncomingChange, change_id)
     if not change:
         raise HTTPException(status_code=404, detail="Change not found")
-    if not change.authority_counter:
-        raise HTTPException(status_code=400, detail="No open authority counter to accept")
+    if not change.npci_counter:
+        raise HTTPException(status_code=400, detail="No open NPCI counter to accept")
     try:
-        active = json.loads(change.authority_counter)
+        active = json.loads(change.npci_counter)
     except (json.JSONDecodeError, TypeError):
-        raise HTTPException(status_code=500, detail="Corrupt authority_counter state")
+        raise HTTPException(status_code=500, detail="Corrupt npci_counter state")
     active_cp_id = active.get("counter_proposal_id")
     if active_cp_id != cp_id:
         raise HTTPException(
@@ -258,22 +255,22 @@ def accept_counter_proposal(
             detail=f"Counter '{cp_id}' is not the open counter (open={active_cp_id})",
         )
 
-    kit_id = f"CHG_{change.authority_change_id}"
+    kit_id = f"CHG_{change.npci_change_id}"
     resolution_text = f"Counter terms accepted by {getattr(user, 'full_name', None) or user.username}"
     result = send_counter_decision(
-        db, change.authority_change_id, kit_id,
+        db, change.npci_change_id, kit_id,
         counter_proposal_id=cp_id,
         decision="ACCEPT",
         resolution_text=resolution_text,
     )
     if not result:
-        raise HTTPException(status_code=502, detail="Failed to deliver counter decision to the authority")
+        raise HTTPException(status_code=502, detail="Failed to deliver counter decision to NPCI")
 
-    _archive_authority_counter(change, resolution="accepted", response_text=resolution_text)
-    change.authority_counter = None
+    _archive_npci_counter(change, resolution="accepted", response_text=resolution_text)
+    change.npci_counter = None
     db.commit()
 
-    logger.info("Authority counter accepted: change=%s cp=%s by=%s", change_id, cp_id, user.username)
+    logger.info("NPCI counter accepted: change=%s cp=%s by=%s", change_id, cp_id, user.username)
     return {"sent": True, "counter_proposal_id": cp_id, "decision": change.decision}
 
 

@@ -1,12 +1,9 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: testing — run the partner Test agent against a change to
-author a test plan (partner-side cases + coverage mapping to authority cert cases),
+author a test plan (partner-side cases + coverage mapping to NPCI cert cases),
 persist a versioned plan, serve it (JSON + .docx download).
 
 The agent AUTHORS only. Execution of the authoritative certification suite is
-delegated to the authority via the existing cert-readiness lifecycle (dashboard
+delegated to NPCI via the existing cert-readiness lifecycle (dashboard
 /certification.py) — this module does not run tests.
 
 Module is `testing.py` (not `test.py`) to avoid pytest discovery; the registry
@@ -24,8 +21,7 @@ from sqlalchemy.orm import Session
 from app.agents import registry
 from app.api.auth import get_current_user
 from app.database import get_db
-from app.core.llm import resolve_runtime_api_key
-from app.models import DesignReport, IncomingChange, PartnerUser, TestReport
+from app.models import DesignReport, IncomingChange, PartnerSetting, PartnerUser, TestReport
 from app.rag.retrieval import build_kb_context
 
 from ._shared import markdown_to_docx_bytes
@@ -40,7 +36,8 @@ def _kb_context(db: Session, change: IncomingChange) -> str:
 
 
 def _runtime_api_key(db: Session) -> str | None:
-    return resolve_runtime_api_key(db)
+    row = db.get(PartnerSetting, "partner_anthropic_api_key")
+    return row.value if row and row.value else None
 
 
 def _latest_design_summary(db: Session, change_id: str) -> str | None:

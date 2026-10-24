@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { useState } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useNavigate, useLocation } from 'react-router-dom';
@@ -18,7 +15,7 @@ import KnowledgeBase from './pages/KnowledgeBase';
 import Login from './pages/Login';
 import Users from './pages/Users';
 import ChangePasswordModal from './components/common/ChangePasswordModal';
-import { BRAND_LOGO_URL, BRAND_NAME } from './brand';
+import bankLogo from './assets/bank-logo.png';
 
 // Sidebar navigation. `admin: true` items only render for admin users —
 // non-admins also can't reach them via URL (see AdminRoute).
@@ -84,8 +81,8 @@ function Layout({ children }) {
     <div className="app-shell">
       <aside className="sidebar" aria-label="Main navigation">
         <div className="sidebar-brand">
-          {BRAND_LOGO_URL && <img src={BRAND_LOGO_URL} alt="" />}
-          <span>{BRAND_NAME}</span>
+          <img src={bankLogo} alt="SBI" />
+          <span>Partner Platform</span>
         </div>
 
         <nav className="sidebar-nav">

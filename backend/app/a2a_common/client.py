@@ -1,72 +1,37 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Generic outbound A2A client.
 
-Wraps `a2a.client.ClientFactory` so any backend can send a Task to a
-remote agent (partner / cert-agent / NPCI) by URL, with optional Bearer
-auth. Cert-agent's outbound code (`certagent/cert-agent/app/a2a/client.py`)
-remains the reference for cert-specific helpers; this module is the
-generic primitive used by `services/a2a_client.py`.
+Wraps `a2a.client.ClientFactory` so a backend can send a Task to a remote agent by
+URL with optional Bearer auth + HMAC envelope.
 
-This module ships only `send_a2a_message`. Streaming, multi-turn, and
-push-notification variants land alongside the per-backend Executors.
+Two differences from NPCI's `backend/app/a2a_common/client.py`, both deliberate —
+a fix to this primitive should be considered for both copies:
+
+1. It returns the receiver's reply instead of `None`. The Txn Egress needs the
+   ACK that rides back in the same synchronous A2A reply, and an operator hitting
+   a readiness/declare call wants to see what NPCI said. Existing callers that
+   only care that delivery succeeded simply ignore the return value.
+
+2. It moves the RPC URL the agent card advertises onto `base_url` (see
+   `_rebase_to_base_url`). The card was fetched from `base_url`, so that host is
+   reachable by definition; the host the card advertises is whatever NPCI's
+   `npci_public_url` was set to, which is a docker service name that does not
+   resolve from a partner running outside NPCI's compose network.
 """
 from __future__ import annotations
 
+import functools
+import logging
+import time
 import uuid
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from a2a.client import ClientConfig, ClientFactory
+from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types.a2a_pb2 import Message, Part, Role, SendMessageRequest
 from google.protobuf import json_format, struct_pb2
 
-from app.a2a_common.hmac_signer import LEGACY_HEADER_PREFIX, emit_legacy_headers
-
-# Observability headers, emitted on every outbound call so a receiver's log and
-# APM pipeline can correlate a delivery without parsing the JSON-RPC body.
-#
-# These were the last branded headers on this wire. The HMAC envelope headers
-# got a dual-emit rollout and these did not, so every outbound call from every
-# deployment — whatever its domain — still carried one organisation's namespace
-# into somebody else's access logs.
-#
-# Same treatment now: the neutral name is ALWAYS sent, the superseded one rides
-# the shared `A2A_EMIT_LEGACY_HEADERS` switch. Purely additive, so an operator
-# whose nginx/WAF/APM rules key on the old literal keeps working until they
-# retarget them and flip the switch. Nothing on either side READS these, which
-# is why they can move without a coordinated deploy — unlike the envelope
-# headers, a missed rename here costs a correlation, not a 401.
-HEADER_CORRELATION_ID = "X-Auth-Correlation-ID"
-HEADER_CHANGE_ID      = "X-Auth-Change-ID"
-
-LEGACY_HEADER_CORRELATION_ID = f"{LEGACY_HEADER_PREFIX}-Correlation-ID"
-LEGACY_HEADER_CHANGE_ID      = f"{LEGACY_HEADER_PREFIX}-Change-ID"
-
-
-def observability_headers(correlation_id: str | None, data: object = None) -> dict[str, str]:
-    """The correlation headers for one outbound call.
-
-    Extracted from `send_a2a_message` so the dual-emit is directly testable —
-    inline, the only way to observe it was to mock the whole SDK client, which
-    is why the previous branded spelling went unnoticed for so long.
-    """
-    out: dict[str, str] = {}
-    legacy = emit_legacy_headers()
-
-    if correlation_id:
-        out[HEADER_CORRELATION_ID] = correlation_id
-        if legacy:
-            out[LEGACY_HEADER_CORRELATION_ID] = correlation_id
-
-    change_id = data.get("change_id") if isinstance(data, dict) else None
-    if change_id:
-        out[HEADER_CHANGE_ID] = str(change_id)
-        if legacy:
-            out[LEGACY_HEADER_CHANGE_ID] = str(change_id)
-
-    return out
+logger = logging.getLogger("partner.a2a")
 
 
 def _dict_to_part(payload: dict) -> Part:
@@ -85,42 +50,56 @@ def _dict_to_part(payload: dict) -> Part:
     return part
 
 
-def _extract_artifact_dict(event) -> Optional[dict]:
-    """Pull a structured-Part dict out of any A2A SDK event (ITA-3 / B2).
+def _rebase_to_base_url(url: str, base_url: str) -> str:
+    """Move `url` onto `base_url`'s scheme + host, keeping its path and query.
 
-    Ported from the NPCI backend's client, which has captured replies this way
-    all along — the two files legitimately differ per service, but the
-    SDK event shapes do not. With streaming=False the SDK yields a
-    StreamResponse wrapping the payload in a oneof (task / message /
-    status_update / artifact_update); the Task carrying `.artifacts` lives
-    INSIDE that oneof — without the unwrap every receiver reply reads as None.
+    The card's PATH is authoritative — NPCI serves the RPC at `/a2a-rpc/rpc`
+    and only NPCI knows that — while its HOST is whatever `npci_public_url` was
+    set to on the NPCI side, which is `http://npci_backend:8000` unless someone
+    overrode it. That default is correct for every peer inside the compose
+    network and unroutable from anywhere else, and one card serves both, so the
+    receiver cannot publish a value that satisfies everyone. Rebasing keeps the
+    host we were configured to reach and takes the path from the card.
     """
-    inner = event
-    for _field in ("task", "message", "status_update", "artifact_update"):
-        try:
-            if event.HasField(_field):
-                inner = getattr(event, _field)
-                break
-        except (ValueError, AttributeError):
-            continue
+    base, target = urlsplit(base_url), urlsplit(url)
+    if not base.netloc:
+        return url
+    return urlunsplit((
+        base.scheme or target.scheme, base.netloc,
+        target.path, target.query, target.fragment,
+    ))
 
-    candidates: list = []
-    artifacts = getattr(inner, "artifacts", None) or []
-    for art in artifacts:
-        candidates.extend(getattr(art, "parts", None) or [])
-    one_artifact = getattr(inner, "artifact", None)
-    if one_artifact is not None:
-        candidates.extend(getattr(one_artifact, "parts", None) or [])
-    if hasattr(inner, "parts"):
-        candidates.extend(getattr(inner, "parts", None) or [])
 
-    for part in candidates:
-        try:
-            if part.HasField("data") and part.data.HasField("struct_value"):
-                return json_format.MessageToDict(part.data.struct_value)
-        except Exception:  # noqa: BLE001 — defensive against unknown shapes
-            continue
-    return None
+@functools.lru_cache(maxsize=1)
+def _ssl_context():
+    """One TLS context for every outbound client.
+
+    Building it loads the system CA store (about a second on a Windows host) and
+    a client used to be built per message. The context itself is reusable
+    across clients and event loops."""
+    return httpx.create_ssl_context()
+
+
+# base_url -> (expires_at, rebased card). The card changes only when NPCI is
+# redeployed, so fetching it for every message is a wasted round-trip.
+_CARD_TTL_SECONDS = 300.0
+_cards: dict = {}
+
+
+async def _agent_card(http: "httpx.AsyncClient", base_url: str):
+    hit = _cards.get(base_url)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    card = await A2ACardResolver(http, base_url).get_agent_card()
+    for interface in card.supported_interfaces:
+        moved = _rebase_to_base_url(interface.url, base_url)
+        if moved != interface.url:
+            # The one line that makes a card/URL mismatch visible — without
+            # it the send just fails to connect to a host nothing logged.
+            logger.info("agent card RPC url %s -> %s", interface.url, moved)
+            interface.url = moved
+    _cards[base_url] = (time.monotonic() + _CARD_TTL_SECONDS, card)
+    return card
 
 
 async def send_a2a_message(
@@ -131,10 +110,9 @@ async def send_a2a_message(
     data: dict,
     auth_header: Optional[str] = None,
     hmac_secret: Optional[str] = None,
-    correlation_id: Optional[str] = None,
     timeout: float = 30.0,
-) -> Optional[dict]:
-    """Send a single A2A message to a remote agent and return its reply body.
+) -> dict:
+    """Send a single A2A message to a remote agent and return its reply.
 
     Args:
         base_url:    Remote agent's host (e.g. `http://cert-agent:8000`
@@ -150,35 +128,20 @@ async def send_a2a_message(
         auth_header: Optional `Authorization` header (e.g. "Bearer <jwt>").
                      Plug `fetch_bearer_jwt(...)` from auth.py here when
                      calling cert-agent or any partner that requires JWT.
-        correlation_id: Optional value sent as `X-Auth-Correlation-ID` (and,
-                     when `data` carries a `change_id`, `X-Auth-Change-ID`),
-                     each dual-emitted under the superseded `X-NPCI-*` spelling
-                     while `A2A_EMIT_LEGACY_HEADERS` is on, so the receiver's
-                     logs/telemetry can be traced back to
-                     the originating job/thread. Distinct from
-                     the ENVELOPE's own `correlation_id` field (which
-                     `data` already carries where applicable) — this is the
-                     transport-layer header a proxy/log pipeline can filter
-                     on without parsing the JSON-RPC body.
         timeout:     httpx client timeout in seconds. 30s is a reasonable
                      default for synchronous task acceptance; longer
                      calls should switch to streaming.
 
     Returns:
-        The receiver's structured reply as a dict — for NPCI, the
-        `a2a-task-receipt` artifact (since ITA-2 possibly carrying a merged
-        handler dict, e.g. a structured `http_exchange_response`) — or None
-        when the receiver emitted no structured artifact. Until ITA-3 this
-        layer drained the stream and returned None; the tunnel's reverse
-        direction needs the body to actually come home (blocker B2).
+        The structured data Part of the receiver's final artifact, or `{}`
+        if it emitted none. See the divergence note in the module docstring.
     """
     headers: dict[str, str] = {}
     if auth_header:
         headers["Authorization"] = auth_header
-    headers.update(observability_headers(correlation_id, data))
 
-    # Outbound HMAC envelope — partner→NPCI direction. When
-    # the partner has installed `partner_settings.authority_hmac_secret`,
+    # Slice 5 outbound HMAC envelope — partner→NPCI direction. When
+    # the partner has installed `partner_settings.npci_hmac_secret`,
     # callers pass it here to sign outbound bodies. The hook fires
     # after httpx serialises the SDK's JSON-RPC body, so we sign the
     # actual wire bytes the receiver will hash.
@@ -197,9 +160,13 @@ async def send_a2a_message(
         timeout=timeout,
         headers=headers,
         event_hooks=event_hooks or None,
+        verify=_ssl_context(),
     ) as http:
         factory = ClientFactory(ClientConfig(httpx_client=http, streaming=False))
-        client = await factory.create_from_url(base_url)
+        # `create_from_url` would resolve the card and post to whatever host it
+        # advertises; resolve it here instead so the URL can be rebased first.
+        card = await _agent_card(http, base_url)
+        client = factory.create(card)
         # task_id on Message means "continue this EXISTING task on the
         # receiver" per the A2A spec. For first sends we omit it so
         # NPCI allocates a new task; the caller's `task_id` arg stays
@@ -212,12 +179,20 @@ async def send_a2a_message(
                 parts=[_dict_to_part(data)],
             )
         )
-        # Capture the LAST structured artifact while draining — the receipt
-        # is emitted last (after any incremental events), and "last wins"
-        # matches the NPCI client's behaviour for the same stream.
-        last_response: Optional[dict] = None
-        async for event in client.send_message(req):
-            artifact = _extract_artifact_dict(event)
-            if artifact is not None:
-                last_response = artifact
-        return last_response
+        # The stream carries StreamResponse events; the completed Task (with
+        # the receiver's artifact) rides on the `task` field. Later events
+        # overwrite earlier ones so the LAST artifact wins, which is the final
+        # state rather than an intermediate one.
+        reply: dict = {}
+        try:
+            async for ev in client.send_message(req):
+                if not ev.HasField("task"):
+                    continue
+                for artifact in ev.task.artifacts:
+                    for part in artifact.parts:
+                        if part.HasField("data"):
+                            reply = json_format.MessageToDict(part.data.struct_value)
+        except Exception:
+            _cards.pop(base_url, None)   # a failed send may mean a stale card
+            raise
+        return reply

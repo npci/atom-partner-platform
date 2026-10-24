@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `round_closed`.
 
 NPCI→bank per-partner notice that a negotiation round has closed. Reason
@@ -26,10 +23,10 @@ logger = logging.getLogger(__name__)
 
 def handle_round_closed(body: TaskReceiveRequest, db: Session) -> dict:
     payload = body.payload or {}
-    authority_change_id = payload.get("change_id", body.change_id or "")
+    npci_change_id = payload.get("change_id", body.change_id or "")
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == authority_change_id)
+        .filter(IncomingChange.npci_change_id == npci_change_id)
         .first()
     )
     if not change:
@@ -48,7 +45,7 @@ def handle_round_closed(body: TaskReceiveRequest, db: Session) -> dict:
     # from the structured close_reason for consistent display across the
     # (formerly piggybacked) and new first-class notices.
     _reason_text = {
-        "pm_forced":              "The authority's PM has closed this negotiation round.",
+        "pm_forced":              "NPCI's PM has closed this negotiation round.",
         "silent_acceptance":      "The negotiation round timed out (no response within the round window).",
         "superseded_by_version":  "A new kit version has been shipped; the current round is closed.",
         "frozen":                 "Negotiation has frozen — no further rounds will open for this change.",

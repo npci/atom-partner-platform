@@ -1,14 +1,11 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""`RemoteAgent` — calls a partner-hosted agent over HTTP (the `url:` binding).
+"""`RemoteAgent` — calls a bank-hosted agent over HTTP (the `url:` binding).
 
 Subclasses `Agent`, so audit + lifecycle are identical to in-process agents.
-A partner flips an agent from shipped in-process code to their own service by
+A bank flips an agent from shipped in-process code to their own service by
 changing one manifest line:
 
     agents:
-      code: { url: https://partner-host/agents/code, auth: bearer, timeout_s: 30, retries: 2 }
+      code: { url: https://bank-host/agents/code, auth: bearer, timeout_s: 30, retries: 2 }
 
 Wire contract (see ARCHITECTURE.md):
     POST {url}/run

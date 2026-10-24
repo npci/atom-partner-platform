@@ -1,7 +1,4 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""Document RAG ingestion — chunk + embed + store authority change documents and
+"""Document RAG ingestion — chunk + embed + store NPCI change documents and
 partner knowledge-base documents into the shared `document_chunks` pgvector
 table (doc_category 'change_doc' / 'kb').
 
@@ -76,146 +73,24 @@ def _store_chunks(
     return written
 
 
-# ── Fully-static DELETE statements (sonatype-2021-0025 hardening) ───────────
-#
-# WHY THESE ARE CONSTANTS AND NOT AN f-STRING
-#
-# This function used to build its WHERE clause by joining a list and
-# interpolating it:
-#
-#     db.execute(_sql(f"DELETE FROM document_chunks WHERE {' AND '.join(clauses)}"), params)
-#
-# That code was SAFE at runtime — `clauses` only ever held hardcoded predicate
-# literals and every value went through a bound parameter. But it is not
-# safe-by-CONSTRUCTION, and that distinction is the whole finding:
-#
-#   1. To a taint analyser (and to Sonatype's sonatype-2021-0025 advisory, which
-#      flags dynamic SQL assembly on SQLAlchemy), an f-string reaching `text()`
-#      is a SQL-injection sink. It cannot prove the interpolated list holds only
-#      literals, so it reports the path. The advisory has no fixed version, so
-#      this pattern would keep firing on every scan forever regardless of which
-#      SQLAlchemy version we pin.
-#   2. More importantly, the old shape was one careless edit away from being a
-#      REAL injection. Appending `clauses.append(f"x = '{user_value}'")` would
-#      have compiled, passed review as "matching the existing style", and shipped
-#      an exploitable query. The safety lived in a convention, not in the code.
-#
-# Enumerating the call shapes as module-level constants removes the sink
-# entirely: every SQL string below is a literal fixed at import time, so there is
-# no construction step for an analyser to flag or a future edit to poison. The
-# combinations are closed and small (this table has exactly three optional scope
-# columns), so exhaustive enumeration costs a few lines and buys a provable
-# property.
-#
-# ── THE ENUMERATION MUST BE COMPLETE: 2^3 = 8, NOT 6 ────────────────────────
-# An earlier revision of this table defined only SIX constants and selected them
-# with an if/elif chain that tested `repo_id` before `change_id`. When a caller
-# passed BOTH, the chain took the repo branch and SILENTLY DROPPED the
-# `change_id = :cid` predicate — issuing a DELETE strictly BROADER than the
-# caller asked for. Verified: with both set, six extra rows were removed.
-#
-# It was latent (today's two call sites pass one or the other) but it was a real
-# data-loss bug one caller away, and it made the docstring's "predicates are
-# exactly those whose argument is not None" claim false. The lesson is that a
-# partial enumeration reached by branch priority is strictly worse than the
-# f-string it replaced: the f-string at least always produced the correct
-# predicate set.
-#
-# So all eight combinations are now present and selected by an exact key rather
-# than by branch order, which cannot silently degrade. `test_no_dynamic_sql.py`
-# asserts the table is complete, and `test_delete_chunks_scoping.py` asserts the
-# executed predicate set matches the requested scope for every combination.
-#
-# If a fourth scope is ever needed, this table doubles to 16 — at that point
-# switch to a SQLAlchemy Core `delete()` construct with `.where()` clauses, which
-# is composable AND still parameterised (it builds no SQL string). Do NOT
-# reintroduce text-mode string building.
-_DEL_BY_CATEGORY = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat"
-)
-_DEL_BY_CATEGORY_CHANGE = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat AND change_id = :cid"
-)
-_DEL_BY_CATEGORY_SOURCE = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat AND source_key = :sk"
-)
-_DEL_BY_CATEGORY_CHANGE_SOURCE = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat "
-    "AND change_id = :cid AND source_key = :sk"
-)
-_DEL_BY_CATEGORY_REPO = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat AND repo_id = :rid"
-)
-_DEL_BY_CATEGORY_REPO_SOURCE = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat "
-    "AND repo_id = :rid AND source_key = :sk"
-)
-# ── The two combinations the earlier revision was missing ───────────────────
-_DEL_BY_CATEGORY_CHANGE_REPO = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat "
-    "AND change_id = :cid AND repo_id = :rid"
-)
-_DEL_BY_CATEGORY_CHANGE_REPO_SOURCE = _sql(
-    "DELETE FROM document_chunks WHERE doc_category = :cat "
-    "AND change_id = :cid AND repo_id = :rid AND source_key = :sk"
-)
-
-# Exact-match dispatch table, keyed by which scopes are present as
-# (has_change_id, has_repo_id, has_source_key).
-#
-# A dict keyed on the full tuple is used rather than an if/elif chain BECAUSE of
-# the bug described above: a chain encodes a priority order, so an unhandled
-# combination silently falls through to whichever branch happens to match first.
-# A dict lookup has no fallback — a missing key raises KeyError immediately
-# instead of quietly running a broader DELETE. The completeness test asserts all
-# eight keys are present, so that KeyError is unreachable in practice.
-_DELETE_STATEMENTS = {
-    # (change_id, repo_id, source_key)
-    (False, False, False): _DEL_BY_CATEGORY,
-    (False, False, True): _DEL_BY_CATEGORY_SOURCE,
-    (False, True, False): _DEL_BY_CATEGORY_REPO,
-    (False, True, True): _DEL_BY_CATEGORY_REPO_SOURCE,
-    (True, False, False): _DEL_BY_CATEGORY_CHANGE,
-    (True, False, True): _DEL_BY_CATEGORY_CHANGE_SOURCE,
-    (True, True, False): _DEL_BY_CATEGORY_CHANGE_REPO,
-    (True, True, True): _DEL_BY_CATEGORY_CHANGE_REPO_SOURCE,
-}
-
-
 def _delete_chunks(db: Session, *, doc_category: str, change_id: str | None = None,
                    source_key: str | None = None, repo_id: str | None = None) -> None:
-    """Delete the chunks for one ingestion scope.
-
-    Selects a pre-built static statement from `_DELETE_STATEMENTS` rather than
-    assembling SQL. Values are bound, never interpolated.
-
-    Scoping contract, which `test_delete_chunks_scoping.py` enforces for all
-    eight combinations: the predicates applied are EXACTLY `doc_category` plus
-    one for each of `change_id`, `repo_id` and `source_key` that is not None,
-    ANDed together. Passing more arguments always narrows the delete and never
-    widens it. This matches the pre-hardening dynamic implementation exactly.
-    """
+    clauses = ["doc_category = :cat"]
     params: dict = {"cat": doc_category}
-
-    # Build the dispatch key from which scopes were supplied, then bind only the
-    # matching values. Every combination has its own statement, so no argument
-    # can be silently ignored — contrast the earlier if/elif version, which
-    # dropped `change_id` whenever `repo_id` was also given.
     if change_id is not None:
+        clauses.append("change_id = :cid")
         params["cid"] = change_id
-    if repo_id is not None:
-        params["rid"] = repo_id
     if source_key is not None:
+        clauses.append("source_key = :sk")
         params["sk"] = source_key
-
-    stmt = _DELETE_STATEMENTS[
-        (change_id is not None, repo_id is not None, source_key is not None)
-    ]
-    db.execute(stmt, params)
+    if repo_id is not None:
+        clauses.append("repo_id = :rid")
+        params["rid"] = repo_id
+    db.execute(_sql(f"DELETE FROM document_chunks WHERE {' AND '.join(clauses)}"), params)
 
 
 def ingest_change_documents(db: Session, change_id: str) -> int:
-    """(Re)index the authority documents for one change. Returns chunks written.
+    """(Re)index the NPCI documents for one change. Returns chunks written.
 
     Indexes the latest version of each doc_type so retrieval doesn't surface
     superseded revisions. Idempotent — wipes the change's prior change_doc chunks

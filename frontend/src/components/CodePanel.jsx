@@ -1,12 +1,8 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // CodePanel — renders the partner-side implementation plan produced by the Code
 // agent. Shows a grounding banner (green when repo-grounded via Code RAG, amber
 // when spec-only) and an "Open MR" action that generates whole files from the
 // plan and opens a merge request on the indexed repo. Mirrors DesignPanel/TestingPanel.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { t } from '../strings'
 import { formatDateTime } from '../lib/datetime';
 import {
   AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Code2, Download, FileCode2,
@@ -20,7 +16,7 @@ import {
   getCodeReport, getCodeReview, getCodeReviewHistory, getGeneratedFiles,
   openCodeMergeRequest, runCodeAnalysis, runCodeReview,
 } from '../services/api';
-import { buildMergeRequestUrl } from '../utils/mrUrl';
+import { safeHref } from '../utils/safeUrl';
 import Badge from './ui/Badge';
 import Button from './ui/Button';
 
@@ -53,53 +49,12 @@ const CONF_COLOUR = { high: T.success, medium: T.warning, low: T.danger };
 const SEV_COLOUR = {
   critical: T.danger, high: T.danger, medium: T.warning, low: T.textMuted, info: T.textMuted,
 };
-const REVIEWER_LABEL = {
-  code_quality: 'Code Quality',
-  security: 'Security',
-  lint: 'Lint (deterministic)',
-  design_alignment: 'Design Alignment (advisory)',
-};
+const REVIEWER_LABEL = { code_quality: 'Code Quality', security: 'Security' };
 
 const card = {
   background: T.cardBg, border: T.cardBorder, borderRadius: T.cardRadius,
   boxShadow: T.cardShadow, padding: 18, marginBottom: 18,
 };
-
-/**
- * The merge-request reference, rendered as a link only when the URL can be
- * built locally from build-time configuration.
- *
- * The API deliberately no longer returns `mr_url`; it sends `project_path` and
- * `mr_iid`, and `buildMergeRequestUrl` assembles the address from a build-time
- * base. That is what removed the `data` → `href` dataflow static analysis
- * reported here (DOM XSS, reflected XSS, DOM open redirect).
- *
- * When the URL cannot be built — VITE_GITLAB_BASE_URL unset, or a pre-migration
- * row with no stored `project_path` — this renders the MR number as plain text
- * rather than a dead '#' anchor. An inert link that looks clickable is the UX
- * bug the ArtifactRef change fixed; repeating it here would be a regression.
- */
-function MergeRequestLink({ projectPath, iid }) {
-  const label = iid ? `!${iid}` : 'view MR';
-  const url = buildMergeRequestUrl(projectPath, iid);
-
-  if (!url) {
-    return (
-      <strong
-        title="Set VITE_GITLAB_BASE_URL at build time to link merge requests directly."
-        style={{ color: T.textSecondary, fontWeight: 600 }}
-      >
-        {label}
-      </strong>
-    );
-  }
-
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer" style={{ color: T.primary, fontWeight: 600 }}>
-      {label}
-    </a>
-  );
-}
 
 export default function CodePanel({ changeId }) {
   const queryClient = useQueryClient();
@@ -264,7 +219,7 @@ export default function CodePanel({ changeId }) {
               Implementation plan
             </div>
             <div style={{ fontSize: 12, color: T.textSecondary }}>
-              No plan yet. Generate a spec-grounded implementation plan + change skeleton from the design and {t('term.authority')} documents.
+              No plan yet. Generate a spec-grounded implementation plan + change skeleton from the design and NPCI documents.
             </div>
           </div>
           <Button
@@ -383,12 +338,14 @@ export default function CodePanel({ changeId }) {
           <span>{mrMutation.error?.response?.data?.detail || 'Failed to open merge request.'}</span>
         </div>
       )}
-      {mr && mr.status === 'opened' && mr.mr_iid && (
+      {mr && mr.status === 'opened' && mr.mr_url && (
         <div style={{ marginTop: 10, padding: '8px 12px', background: 'rgba(37,99,235,0.05)', border: '1px solid rgba(37,99,235,0.22)', borderRadius: 8, fontSize: 11.5, color: T.textSecondary, display: 'flex', gap: 8, alignItems: 'center' }}>
           <GitPullRequest size={13} color={T.primary} style={{ flexShrink: 0 }} />
           <span>
             Merge request open on <code>{mr.branch}</code> ({mr.files_count} files, plan v{mr.code_report_version}) —{' '}
-            <MergeRequestLink projectPath={mr.project_path} iid={mr.mr_iid} />. Review before merging.
+            <a href={safeHref(mr.mr_url)} target="_blank" rel="noopener noreferrer" style={{ color: T.primary, fontWeight: 600 }}>
+              {mr.mr_iid ? `!${mr.mr_iid}` : 'view MR'}
+            </a>. Review before merging.
           </span>
         </div>
       )}
@@ -406,7 +363,7 @@ export default function CodePanel({ changeId }) {
         <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(245,158,11,0.07)', border: '1px solid rgba(245,158,11,0.28)', borderRadius: 8, fontSize: 11.5, color: T.textSecondary, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
           <Info size={13} color={T.warning} style={{ flexShrink: 0, marginTop: 1 }} />
           <span>
-            <strong>Un-grounded plan</strong> — generated from the design + {t('term.authority')} documents only, <em>without</em> your repository.
+            <strong>Un-grounded plan</strong> — generated from the design + NPCI documents only, <em>without</em> your repository.
             File paths are best-guesses (see confidence per file); a developer must refine against the real codebase.
             Index a repository under Settings to get a repository-grounded plan.
           </span>
@@ -529,34 +486,8 @@ export default function CodePanel({ changeId }) {
           </div>
         )}
 
-        {/* Findings, grouped by reviewer.
-            The design-alignment lens is advisory and deliberately carries an
-            EMPTY `findings` array (a non-empty one would block the MR), so it
-            gets its own branch — the generic renderer would otherwise show a
-            meaningless "0 findings / No issues" row and hide the deviations. */}
-        {(review?.reviews || []).map((rv) => (rv.reviewer === 'design_alignment' ? (
-          <div key={rv.reviewer} style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, display: 'flex', alignItems: 'center', gap: 6 }}>
-              {REVIEWER_LABEL[rv.reviewer]}
-              <span style={{ fontSize: 10.5, fontWeight: 600, color: rv.aligned === false ? T.warning || T.danger : T.success }}>
-                {rv.aligned === false
-                  ? `${(rv.deviations || []).length} deviation${(rv.deviations || []).length !== 1 ? 's' : ''}`
-                  : 'aligned'}
-              </span>
-            </div>
-            <div style={{ fontSize: 11.5, color: T.textMuted, marginTop: 3 }}>{rv.summary}</div>
-            {(rv.deviations || []).length > 0 && (
-              <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 11.5, color: T.textSecondary, lineHeight: 1.6 }}>
-                {(rv.deviations || []).map((d, i) => (
-                  <li key={i}>{typeof d === 'string' ? d : (d.detail || d.title || JSON.stringify(d))}</li>
-                ))}
-              </ul>
-            )}
-            <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 5, fontStyle: 'italic' }}>
-              Advisory only — does not block the merge request.
-            </div>
-          </div>
-        ) : (
+        {/* Findings, grouped by reviewer */}
+        {(review?.reviews || []).map((rv) => (
           <div key={rv.reviewer} style={{ marginTop: 12 }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, display: 'flex', alignItems: 'center', gap: 6 }}>
               {REVIEWER_LABEL[rv.reviewer] || rv.reviewer}
@@ -590,14 +521,13 @@ export default function CodePanel({ changeId }) {
               </div>
             )}
           </div>
-        )))}
+        ))}
 
-        {/* Fix history — what was fixed per iteration (code-quality + security + lint) */}
+        {/* Fix history — what was fixed per iteration (code-quality + security) */}
         {(() => {
           const iterations = history?.iterations || [];
-          const LENSES = ['code_quality', 'security', 'lint'];
           const totalFixed = iterations.reduce(
-            (n, it) => n + LENSES.reduce((m, lens) => m + (it.fixed?.[lens]?.length || 0), 0), 0);
+            (n, it) => n + (it.fixed?.code_quality?.length || 0) + (it.fixed?.security?.length || 0), 0);
           if (iterations.length <= 1 && totalFixed === 0) return null;
           return (
             <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T.borderSubtle}` }}>
@@ -611,16 +541,17 @@ export default function CodePanel({ changeId }) {
               {showHistory && (
                 <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {iterations.map((it) => {
-                    const byLens = LENSES.map((lens) => [lens, it.fixed?.[lens] || []]);
-                    const fixedCount = byLens.reduce((n, [, items]) => n + items.length, 0);
-                    const openCount = LENSES.reduce((n, lens) => n + (it.reviews?.[lens]?.length || 0), 0);
+                    const fq = it.fixed?.code_quality || [];
+                    const fs = it.fixed?.security || [];
+                    const fixedCount = fq.length + fs.length;
+                    const openCount = (it.reviews?.code_quality?.length || 0) + (it.reviews?.security?.length || 0);
                     return (
                       <div key={it.iteration}>
                         <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary }}>
                           Iteration {it.iteration}
                           {fixedCount > 0 ? (
                             <span style={{ fontSize: 11, fontWeight: 600, color: T.success, marginLeft: 6 }}>
-                              fixed {byLens.map(([lens, items]) => `${items.length} ${REVIEWER_LABEL[lens] || lens}`).join(' · ')}
+                              fixed {fq.length} code-quality · {fs.length} security
                             </span>
                           ) : openCount === 0 ? (
                             <span style={{ fontSize: 11, fontWeight: 600, color: T.success, marginLeft: 6 }}>clean — 0 findings</span>
@@ -628,7 +559,7 @@ export default function CodePanel({ changeId }) {
                             <span style={{ fontSize: 11, color: T.textMuted, marginLeft: 6 }}>no fixes recorded</span>
                           )}
                         </div>
-                        {byLens.map(([lens, items]) => items.length > 0 && (
+                        {[['code_quality', fq], ['security', fs]].map(([lens, items]) => items.length > 0 && (
                           <div key={lens} style={{ marginTop: 5 }}>
                             <div style={{ fontSize: 10.5, fontWeight: 700, color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.3 }}>
                               {REVIEWER_LABEL[lens]} fixes

@@ -1,18 +1,15 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: defects — partner-reported implementation blockers."""
 import logging
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_user
 from app.database import get_db
 from app.models import IncomingChange, PartnerUser
-from app.authority_client import send_blocker, send_emergency_issue
+from app.npci_client import send_blocker, send_emergency_issue
 
 from .changes import get_change
 
@@ -32,24 +29,7 @@ class BlockerRequest(BaseModel):
     impact: str | None = None
     investigation_done: list[str] = []
     options_considered: list[BlockerOption] = []
-
-    # Renamed from `requested_action_from_npci`. This is THIS platform's own
-    # REST API — its only client is this repo's SPA — so unlike the A2A payload
-    # key of the same name, it is not a contract with a separately-deployed
-    # counterparty and can be renamed here.
-    #
-    # The old spelling stays as a validation alias rather than being deleted: an
-    # operator's script or a browser tab open across the upgrade would otherwise
-    # start silently dropping the field, and a blocker filed with an empty
-    # requested action reads as "no action wanted" rather than as a failed
-    # request.
-    requested_action_from_authority: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices(
-            "requested_action_from_authority", "requested_action_from_npci"),
-    )
-
-    model_config = ConfigDict(populate_by_name=True)
+    requested_action_from_npci: str | None = None
 
 
 @router.post("/changes/{change_id}/blocker")
@@ -61,7 +41,7 @@ def report_blocker(
 ):
     """Partner reports an obstacle blocking implementation. Per the
     rollout-doc Journey C: structured severity + impact + investigation
-    + options the authority can pick from. Wire format = task_type='blocker'."""
+    + options NPCI can pick from. Wire format = task_type='blocker'."""
     change = db.get(IncomingChange, change_id)
     if not change:
         raise HTTPException(status_code=404, detail="Change not found")
@@ -73,21 +53,20 @@ def report_blocker(
     blocker_id = f"BLK-{uuid4().hex[:8].upper()}"
     options_payload = [o.model_dump() for o in body.options_considered]
     result = send_blocker(
-        db, change.authority_change_id,
+        db, change.npci_change_id,
         blocker_id=blocker_id,
         severity=body.severity,
         description=body.description,
         impact=body.impact,
         investigation_done=body.investigation_done,
         options_considered=options_payload,
-        requested_action_from_authority=body.requested_action_from_authority,
+        requested_action_from_npci=body.requested_action_from_npci,
     )
     if not result:
-        raise HTTPException(
-            status_code=502, detail="Failed to deliver blocker to the authority")
+        raise HTTPException(status_code=502, detail="Failed to deliver blocker to NPCI")
 
     # Persist locally so the Blockers section can render history +
-    # the resolution the authority sends back later.
+    # the resolution NPCI sends back later.
     import json
     from datetime import datetime, timezone
     existing = []
@@ -103,10 +82,7 @@ def report_blocker(
         "impact":                      body.impact,
         "investigation_done":          body.investigation_done,
         "options_considered":          options_payload,
-        # Written under the neutral key from here on. Rows persisted before this
-        # change still carry `requested_action_from_npci`, so any reader must
-        # accept both — the store is append-only and is never rewritten.
-        "requested_action_from_authority": body.requested_action_from_authority,
+        "requested_action_from_npci":  body.requested_action_from_npci,
         "status":                      "open",
         "resolution":                  None,
         "created_at":                  datetime.now(timezone.utc).isoformat(),
@@ -136,7 +112,7 @@ def raise_emergency_issue(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Post-freeze break-glass channel. Only meaningful once the authority
+    """Post-freeze break-glass channel (Slice 5). Only meaningful once NPCI
     has shipped the final kit version and frozen the change — at which point
     queries/counters are rejected and this is the only way to flag a
     work-stopping problem. Wire format = task_type='emergency_issue'."""
@@ -150,14 +126,14 @@ def raise_emergency_issue(
 
     issue_id = f"EMG-{uuid4().hex[:8].upper()}"
     result = send_emergency_issue(
-        db, change.authority_change_id,
+        db, change.npci_change_id,
         issue_id=issue_id,
         severity=body.severity,
         title=body.title,
         description=body.description,
     )
     if not result:
-        raise HTTPException(status_code=502, detail="Failed to deliver emergency issue to the authority")
+        raise HTTPException(status_code=502, detail="Failed to deliver emergency issue to NPCI")
 
     import json
     from datetime import datetime, timezone

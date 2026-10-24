@@ -1,11 +1,8 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Build the agent registry from the YAML manifest (`config/agents.yaml`).
 
 Per-agent the manifest declares exactly one binding:
   - `impl: module:Class`  → imported and run in-process (default; shipped code)
-  - `url: https://...`    → wrapped in `RemoteAgent` (partner-hosted HTTP service)
+  - `url: https://...`    → wrapped in `RemoteAgent` (bank-hosted HTTP service)
   - `mcp: {...}`          → DESIGNED-FOR, NOT BUILT this pass: raises a clear error
                             so the seam is reserved without a silent no-op.
 

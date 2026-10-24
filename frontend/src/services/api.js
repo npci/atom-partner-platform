@@ -1,26 +1,13 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import axios from 'axios';
-import { t } from '../strings'
 import { API_BASE, LOGIN_PATH } from '../utils/basePath';
 
 // The session JWT lives in an httpOnly cookie (set by the backend on login),
 // so `withCredentials` ships it automatically and there is no Bearer token to
 // read from JS. Same-origin under nginx, so the cookie is sent on every call.
-// Axios defaults to timeout: 0 — wait forever. That is not theoretical here:
-// the backend's LLM client allows a 300s read (core/llm.py), so a stalled
-// agent call left the tab's XHR pinned with no user-visible failure and no
-// recovery short of a reload. Set above the backend's own ceiling so a slow
-// but working request is not cut short — this catches a hung connection, not
-// a slow one.
-const REQUEST_TIMEOUT_MS = 330_000;
-
 const api = axios.create({
   baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
   withCredentials: true,
-  timeout: REQUEST_TIMEOUT_MS,
 });
 
 // 401 interceptor — verify the session is actually dead before bouncing the
@@ -57,7 +44,6 @@ export const silentApi = axios.create({
   baseURL: API_BASE,
   headers: { 'Content-Type': 'application/json' },
   withCredentials: true,
-  timeout: REQUEST_TIMEOUT_MS,
 });
 silentApi.interceptors.response.use((r) => r, (err) => Promise.reject(err));
 
@@ -106,7 +92,7 @@ export async function downloadChangeDocumentVideo(changeId, docId, filename) {
 }
 
 export async function downloadChangeSummary(changeId, filename) {
-  // the authority's "Summary of Changes" for this kit version, as a .docx.
+  // NPCI's "Summary of Changes" for this kit version, as a .docx.
   const resp = await api.get(
     `/changes/${encodeURIComponent(changeId)}/change-summary.docx`,
     { responseType: 'blob' },
@@ -158,14 +144,14 @@ export async function downloadChangeDocumentNative(changeId, docId, filename) {
 
 
 export async function downloadCertSignoff(changeId, filename) {
-  // the authority Certification Result certificate shipped on the all-PASS
+  // NPCI Certification Result certificate shipped on the all-PASS
   // cert_completion_signoff A2A task. Same auth'd-blob-fetch pattern;
   // keyed by change (one sign-off per change), not by document id.
   const resp = await api.get(
     `/changes/${encodeURIComponent(changeId)}/signoff/download`,
     { responseType: 'blob' },
   );
-  triggerBlobDownload(resp.data, filename || `${t('cert.filePrefix')}_Result.docx`);
+  triggerBlobDownload(resp.data, filename || 'NPCI_Certification_Result.docx');
 }
 
 
@@ -177,7 +163,7 @@ export async function downloadCertSignoffPdf(changeId, filename) {
     `/changes/${encodeURIComponent(changeId)}/cert-signoff.pdf`,
     { responseType: 'blob' },
   );
-  triggerBlobDownload(resp.data, filename || `${t('cert.filePrefix')}_Signoff.pdf`);
+  triggerBlobDownload(resp.data, filename || 'NPCI_Certification_Signoff.pdf');
 }
 
 
@@ -253,7 +239,7 @@ export async function submitQuery(changeId, message) {
 }
 
 // Cert-channel messaging — strictly separate from general Phase C
-// queries (different A2A task_type, different authority thread inbox, no
+// queries (different A2A task_type, different NPCI thread inbox, no
 // shared rows on either side).
 export async function submitCertQuery(changeId, message) {
   const { data } = await api.post(`/changes/${changeId}/cert-query`, { message });
@@ -267,20 +253,19 @@ export async function listCertQueries(changeId) {
 
 // Cert lifecycle status — 4-step linear flow:
 // received → deployed → tested → ready_for_certification.
-// Wires through A2A task_type=cert_status_update; the authority flips the
+// Wires through A2A task_type=cert_status_update; NPCI flips the
 // matching ChangePartnerAssignment.status enum.
-export async function getCertStatus(changeId) {
-  const { data } = await silentApi.get(`/changes/${changeId}/cert-status`);
+// NPCI's authoritative record for this change + where our mirror disagrees.
+// On-demand only (never polled): it costs an auth handshake plus a round trip
+// to NPCI. `silentApi` because a 502 here is an upstream problem and must not
+// bounce the operator to the login page.
+export async function getNpciStatus(changeId) {
+  const { data } = await silentApi.get(`/changes/${changeId}/npci-status`);
   return data;
 }
 
-// The partner's own per-case certification evidence (full-trace
-// observability): what the application was asked, what it answered (raw
-// payloads, capped), and how the round's contract graded it.
-export async function listCertExecutions(npciChangeId) {
-  const { data } = await api.get('/integration-testing/cert-executions', {
-    params: { authority_change_id: npciChangeId },
-  });
+export async function getCertStatus(changeId) {
+  const { data } = await silentApi.get(`/changes/${changeId}/cert-status`);
   return data;
 }
 
@@ -290,11 +275,12 @@ export async function updateCertStatus(changeId, body) {
   return data;
 }
 
-// Domain pack vocabulary — roles and their identifier fields. Deployment
-// configuration (DOMAIN_PACK), so it cannot change mid-session; callers cache
-// it with staleTime: Infinity.
-export async function getDomain() {
-  const { data } = await api.get('/domain');
+// Demo-mode: partner UI posts a synthesised UPI cert result set here when
+// NPCI's orchestrator isn't publishing results back on this environment.
+// Backend persists cert_summary + cert_status='certified' and best-effort
+// mirrors the run to NPCI over A2A (cert_test_response).
+export async function certMockComplete(changeId, cert_summary) {
+  const { data } = await api.post(`/changes/${changeId}/cert-mock-complete`, { cert_summary });
   return data;
 }
 
@@ -318,7 +304,7 @@ export async function acceptNegotiationVersion(changeId) {
   return data;
 }
 
-// Accept just the open authority counter (resolves the negotiation thread).
+// Accept just the open NPCI counter (resolves the negotiation thread).
 // Does NOT accept the rollout — that still requires acceptChange().
 export async function acceptCounter(changeId, counterProposalId) {
   const { data } = await api.post(
@@ -429,7 +415,7 @@ export async function getFeasibilityReport(changeId) {
 
 // Force a new analyser run. Persists a new version row server-side and
 // returns the full report. Use to refresh after the partner edits their
-// PARTNER.md or after the authority updates the change documents.
+// PARTNER.md or after NPCI updates the change documents.
 export async function runFeasibilityAnalysis(changeId) {
   const { data } = await api.post(`/feasibility/analyse/${changeId}`);
   return data;

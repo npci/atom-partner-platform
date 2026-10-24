@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: query drafts — auto-suggested clarification questions."""
 import logging
 from datetime import datetime, timezone
@@ -13,8 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.agents.question_suggester import suggest_questions
 from app.api.auth import get_current_user
+from app.config import settings
 from app.database import get_db
-from app.core.llm import resolve_runtime_api_key
 from app.models import (
     ChangeDocument,
     IncomingChange,
@@ -23,7 +20,7 @@ from app.models import (
     PartnerUser,
     QueryDraft,
 )
-from app.authority_client import send_query
+from app.npci_client import send_query
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["dashboard"])
@@ -73,12 +70,12 @@ def suggest_queries_for_change(
         ).all()
         return {"generated": False, "reason": "already_generated", "drafts": [_draft_dict(d) for d in drafts]}
 
-    api_key = resolve_runtime_api_key(db)
+    api_key = _get_setting_value(db, "partner_anthropic_api_key", "") or settings.partner_anthropic_api_key
     if not api_key:
         return {"generated": False, "reason": "no_api_key", "drafts": []}
 
     # Version-aware context: v1 baseline + LLM summary of later-version changes
-    # (option C), so suggested questions factor in what the authority revised.
+    # (option C), so suggested questions factor in what NPCI revised.
     from app.agents.revision_context import assemble_change_context
     ctx = assemble_change_context(db, change_id, api_key)
     if not ctx["documents"]:
@@ -177,7 +174,7 @@ def send_query_draft(
         raise HTTPException(status_code=404, detail="Change not found")
 
     correlation_id = str(uuid4())
-    result = send_query(db, change.authority_change_id, d.text, correlation_id=correlation_id)
+    result = send_query(db, change.npci_change_id, d.text, correlation_id=correlation_id)
 
     outgoing = OutgoingQuery(
         change_id=d.change_id,

@@ -1,12 +1,9 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Markdown/text chunking for the Document RAG.
 
 Size-bounded, paragraph-aware chunks with a small overlap so a retrieved chunk
 carries enough surrounding context to be useful on its own. Deliberately simple
 (no token counting / tree-sitter) — change documents and KB docs are prose +
-tables, not code; the code chunker is a separate concern.
+tables, not code; the code chunker (Phase 3.1) is a separate concern.
 """
 from __future__ import annotations
 

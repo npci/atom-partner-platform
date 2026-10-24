@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Agent registry — the orchestrator's single lookup point.
 
 `registry.get("feasibility")` returns the configured `Agent` (in-process or

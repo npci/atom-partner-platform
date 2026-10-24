@@ -1,11 +1,8 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Code chunking for the Code RAG.
 
 Line-aware, size-bounded chunks with a few lines of overlap so a retrieved chunk
 keeps enough surrounding context (imports, the enclosing signature) to be useful.
-Pragmatic — no tree-sitter / AST parsing (that's the authority-side heavy path); for
+Pragmatic — no tree-sitter / AST parsing (that's the NPCI heavy path); for
 partner-side retrieval, bounded line windows over each file are enough and work
 for any language.
 """

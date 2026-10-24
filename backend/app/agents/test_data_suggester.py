@@ -1,22 +1,19 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """LLM-driven per-TC test data suggester.
 
-When the partner declares "Ready for Certification", the authority's cert-agent
-runs the authority-initiated test cases against a partner simulator that needs
-real-looking partner-side values (addressing handles, account identifiers, etc.).
+When the partner declares "Ready for Certification", NPCI's cert-agent
+runs the NPCI-initiated test cases against a bank simulator that needs
+real-looking bank-side values (payer VPA, account number, IFSC, etc.).
 Filling 20-50 test cases by hand is brutal, so this agent suggests
 defaults derived from the change docs + the TC's scenario summary.
 
-Provider switches via `LLM_PROVIDER` env (anthropic / openai / ainxt) —
+Provider switches via `LLM_PROVIDER` env (claude / openai / ainxt) —
 same routing layer as `question_suggester`.
 
 Output shape (strict JSON):
   {
     "test_data": {
-      "payer_vpa":      "test1@partnerx",
-      "payee_vpa":      "merchant@sim",
+      "payer_vpa":      "test1@bankx",
+      "payee_vpa":      "merchant@npcisim",
       "amount":         "100.00",
       "currency":       "INR",
       "ifsc":           "BKID0001234",
@@ -29,7 +26,7 @@ Output shape (strict JSON):
   }
 
 The partner UI surfaces these as pre-filled form values and tags the
-row with `ai_suggested=True`; the partner user can edit any field before
+row with `ai_suggested=True`; the bank user can edit any field before
 hitting Save (which clears `ai_suggested`).
 """
 from __future__ import annotations
@@ -38,58 +35,35 @@ import json
 import logging
 
 from app.config import settings as _settings
-from app.core.domain import get_active_pack
 from app.core.llm import call_llm, get_model, get_provider
 
 logger = logging.getLogger(__name__)
 
 
-def _system_prompt() -> str:
-    """Build the planner's system prompt from the active domain pack.
+SYSTEM_PROMPT = """You are the test data planner for a UPI ecosystem bank. Your job is to
+produce realistic test_data values for a single NPCI-initiated certification test case
+that will be executed against the bank's simulator.
 
-    A FUNCTION, not a module constant, for two reasons. It has to read the pack,
-    and a module-level constant would freeze whichever pack happened to be
-    active at import — invisible in production, actively wrong in tests that
-    switch packs. It is also cheap: the registry caches the parse.
-
-    The FIELD NAMES come from the pack's roles, so they are the same identifiers
-    the Declare Ready dialog collects and the sign-off PDF prints — one
-    definition, three consumers. Only the value-picking heuristics come from a
-    prompt block, because those are genuine domain knowledge ("insufficient
-    balance" means nothing to a library) and cannot be derived.
-    """
-    pack = get_active_pack()
-    keys: list[str] = []
-    for role in pack.roles:
-        for f in role.fields:
-            if f.key not in keys:
-                keys.append(f.key)
-    # Always-useful keys that are not role identifiers.
-    for extra in ("remarks",):
-        if extra not in keys:
-            keys.append(extra)
-    known = ", ".join(keys) if keys else "whatever the change documents imply"
-
-    guidance = pack.prompt_block("test_data_guidance").strip()
-    guidance_block = f"{guidance}\n" if guidance else (
-        "- Derive values from the change documents; do not invent domain rules.\n"
-    )
-
-    return (
-        f"You are the test data planner for {pack.prompt_block('partner_descriptor', 'an ecosystem partner')}. "
-        f"Your job is to\nproduce realistic test_data values for a single "
-        f"{pack.prompt_block('authority', 'authority')}-initiated certification test case\n"
-        f"that will be executed against the partner's simulator.\n"
-        "\n"
-        "Rules:\n"
-        "- Return STRICT JSON only. No prose, no markdown fences. Shape:\n"
-        '    { "test_data": { ... }, "rationale": "one-line reason" }\n'
-        "- Pick fields that are RELEVANT for the scenario; omit keys that don't apply.\n"
-        f"  Common keys: {known}.\n"
-        f"{guidance_block}"
-        "- `remarks` should be a short tag tying back to the TC ID.\n"
-        "- `rationale` is one sentence — what scenario keyword drove the picks.\n"
-    )
+Rules:
+- Return STRICT JSON only. No prose, no markdown fences. Shape:
+    { "test_data": { ... }, "rationale": "one-line reason" }
+- Pick fields that are RELEVANT for the scenario; omit keys that don't apply.
+  Common keys: payer_vpa, payee_vpa, amount, currency, ifsc, account_number,
+  account_type, mobile_number, remarks, merchant_category_code, original_txn_id.
+- Use the bank's known artifacts (IFSC, account prefixes, VPA handle) when
+  the change docs reveal them. If unknown, fall back to safe defaults:
+  - VPAs:   "test1@bankx" (payer), "merchant@npcisim" (payee)
+  - IFSC:   "BKID0001234"
+  - Amount: derive from scenario keywords
+     - "insufficient" / "low balance"      → "999999.00"
+     - "limit exceeded"                    → "200000.00"
+     - "partial capture" / "partial"       → "500.00"
+     - normal / success / deemed           → "100.00"
+  - currency: always "INR"
+  - account_type: "SAVINGS" unless scenario says current
+- `remarks` should be a short tag tying back to the TC ID.
+- `rationale` is one sentence — what scenario keyword drove the picks.
+"""
 
 
 def _truncate(text: str | None, limit: int) -> str:
@@ -128,13 +102,13 @@ def suggest_test_data(
     stays blank for hand-entry.
 
     `docs_context` is an optional concatenated snippet from the change
-    docs (BRD / cert_test_cases / product_note) to give the LLM partner-
-    specific signals like routing codes or addressing handles.
+    docs (BRD / cert_test_cases / product_note) to give the LLM bank-
+    specific signals like IFSC codes or VPA handles.
     """
     provider = get_provider()
 
     runtime_override: str | None = None
-    if provider == "anthropic":
+    if provider == "claude":
         if api_key:
             runtime_override = api_key
         elif not _settings.partner_anthropic_api_key:
@@ -163,7 +137,7 @@ def suggest_test_data(
 
     try:
         text = call_llm(
-            system=_system_prompt(),
+            system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
             max_tokens=600,
             api_key=runtime_override,

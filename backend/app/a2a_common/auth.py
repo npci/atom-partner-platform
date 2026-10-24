@@ -1,11 +1,8 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Bearer JWT helpers for outbound A2A calls.
 
 Today only the cert_engine handshake uses Bearer JWTs (see
-`backend/app/services/a2a_client.py:_get_cert_engine_jwt`). A later
-change generalises this so every partner type can advertise an `/a2a/auth`
+`backend/app/services/a2a_client.py:_get_cert_engine_jwt`). Slice 5
+generalises this so every partner type can advertise an `/a2a/auth`
 endpoint and the platform exchanges its `api_key` for a short-lived JWT
 on first use, refreshes proactively before expiry.
 

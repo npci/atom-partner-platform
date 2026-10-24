@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // Headline-number tile used on dashboard-y pages. Shared across the
 // main Dashboard + the admin list pages (Approvals, Partners, Users,
 // Product/Code knowledge, Code indexing) so the visual treatment

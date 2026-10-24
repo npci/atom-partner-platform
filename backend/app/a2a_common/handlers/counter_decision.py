@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `counter_decision` — NPCI's decision (ACCEPT / REJECT)
 on a partner-submitted counter proposal (protocol v1 §6.7).
 
@@ -30,7 +27,7 @@ def handle_counter_decision(body: TaskReceiveRequest, db: Session) -> dict:
 
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == change_id)
+        .filter(IncomingChange.npci_change_id == change_id)
         .first()
     )
     if not change:

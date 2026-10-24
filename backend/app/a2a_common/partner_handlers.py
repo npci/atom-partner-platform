@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Compatibility shim — inbound A2A handlers moved to `app.a2a_common.handlers`.
 
 The 711-line monolith was split per task type (WS4). This module re-exports the

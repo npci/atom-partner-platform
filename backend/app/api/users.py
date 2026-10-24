@@ -1,9 +1,5 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """User management endpoints (admin only)."""
 import logging
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -102,42 +98,18 @@ def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    role_before = user.role
-
     if body.full_name is not None:
         user.full_name = body.full_name
     if body.role is not None:
         if body.role not in ("admin", "user"):
             raise HTTPException(status_code=400, detail="Role must be 'admin' or 'user'")
         user.role = body.role
-    password_reset = body.password is not None
-    if password_reset:
+    if body.password is not None:
         _validate_new_password(body.password)
         user.password_hash = hash_password(body.password)
-        # Same session cut-off as the self-service change in api/auth. An
-        # admin resetting a password is usually responding to a compromise, so
-        # it is the path where surviving sessions matter most — and it was the
-        # one with no invalidation at all.
-        user.password_changed_at = datetime.now(timezone.utc).replace(
-            microsecond=0, tzinfo=None)
 
     db.commit()
-
-    # Distinguish the operations. A user→admin promotion and a forced password
-    # reset previously emitted the identical line, so the audit trail could not
-    # tell a privilege grant from a credential reset.
-    if role_before != user.role:
-        logger.info(
-            "User role changed: %s %s -> %s by %s",
-            user.username, role_before, user.role, admin.username,
-        )
-    if password_reset:
-        logger.info(
-            "User password reset by admin: %s by %s (older sessions retired)",
-            user.username, admin.username,
-        )
-    if role_before == user.role and not password_reset:
-        logger.info("User updated: %s by %s", user.username, admin.username)
+    logger.info("User updated: %s by %s", user.username, admin.username)
     return {"updated": True}
 
 

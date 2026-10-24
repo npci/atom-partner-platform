@@ -1,13 +1,10 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""TestAgent — produces a partner-side test plan for an incoming authority change,
-grounded in PARTNER.md + the change's product-kit documents (incl. the authority's
+"""TestAgent — produces a partner-side test plan for an incoming NPCI change,
+grounded in PARTNER.md + the change's product-kit documents (incl. the NPCI
 `cert_test_cases`) + the design document.
 
 The partner does NOT execute the authoritative certification suite — that runs on
-the authority's cert orchestrator after the partner declares readiness. So this agent
-AUTHORS the plan and maps coverage to the authority's cert cases (the delegation
+NPCI's cert orchestrator after the partner declares readiness. So this agent
+AUTHORS the plan and maps coverage to the NPCI cert cases (the delegation
 bridge); execution stays in the existing cert lifecycle.
 
 Module is `testing.py` (not `test.py`) to avoid pytest discovery / stdlib `test`
@@ -23,7 +20,6 @@ import logging
 from app.agents import _common
 from app.agents.base import Agent
 from app.agents.prompts import load_prompt
-from app.core.domain import prompt_block
 from app.core.llm import call_llm, get_model, get_provider
 
 logger = logging.getLogger(__name__)
@@ -78,11 +74,9 @@ def build_test_plan(
             "via Settings, or mount PARTNER.md."
         )
     if not documents:
-        # Surfaced verbatim in the dashboard, so the pack supplies the name.
         raise RuntimeError(
-            f"the change has no documents — "
-            f"{prompt_block('authority_cap', 'the authority')} has not published "
-            f"a document kit for it yet, so there is nothing to plan tests against."
+            "the change has no documents — NPCI has not published a product kit "
+            "for it yet, so there is nothing to plan tests against."
         )
 
     doc_block = _common.truncate_change_docs(documents)
@@ -93,11 +87,9 @@ def build_test_plan(
             "change_documents; the plan is built from v1, not the latest version."
         )
 
-    # Pack block, not a literal — see the matching note in code.py.
-    _auth = prompt_block("authority_cap", "The authority")
     parts: list[str] = [
         "PARTNER.md", "", profile_raw, "", "---", "",
-        f"{_auth} proposed change: {change_title}",
+        f"NPCI proposed change: {change_title}",
     ]
     if change_initial_prompt:
         parts.append(f"\nPO prompt: {change_initial_prompt}")
@@ -107,8 +99,8 @@ def build_test_plan(
         parts += ["", "---", "", f"Design posture (test against this): {design_summary}"]
     parts += [
         "", "---", "",
-        f"{_auth} change documents (baseline — version 1; includes "
-        f"cert_test_cases when present):", "", doc_block,
+        "NPCI change documents (baseline — version 1; includes cert_test_cases "
+        "when present):", "", doc_block,
     ]
     if revision_summary:
         parts += [
@@ -132,7 +124,8 @@ def build_test_plan(
             messages=[{"role": "user", "content": user_msg}],
             # Test plan markdown + per-suite cases is the largest single-JSON
             # output of the analyse agents; a real plan truncated at 32k, so use
-            # a 64k budget sized to the observed output. call_llm raises on truncation.
+            # the model's full 64k ceiling (CLAUDE.md §3.6 — size the cap to the
+            # real output). call_llm raises on truncation.
             max_tokens=64000,
             api_key=_common.runtime_override_key(api_key),
         )
@@ -146,10 +139,7 @@ def build_test_plan(
                 "change is unusually large; re-run or split it."
             ) from e
         logger.error("build_test_plan: LLM call failed", exc_info=True)
-        # Type only — the provider's message can echo the request URL, model
-        # id and key prefix, and this string lands on the job row that the
-        # dashboard renders (CWE-209). Full detail is in the log line above.
-        raise RuntimeError(f"the LLM call failed ({type(e).__name__})") from e
+        raise RuntimeError(f"the LLM call failed ({type(e).__name__}: {e})") from e
 
     obj = _common.extract_json(text)
     if obj is None:
@@ -188,7 +178,7 @@ def _mock_plan(reason: str) -> dict:
             "suite": "functional", "summary": "Mock output — no LLM key configured.",
             "cases": [],
         }],
-        "cert_coverage": {"authority_cases_total": 0, "covered": 0, "gaps": [f"Mock: {reason}."]},
+        "cert_coverage": {"npci_cases_total": 0, "covered": 0, "gaps": [f"Mock: {reason}."]},
         "test_data_needed": [],
         "open_questions": [],
         "_meta": {"mock": True, "profile_version": "unknown", "model_used": f"{get_provider()}:mock"},

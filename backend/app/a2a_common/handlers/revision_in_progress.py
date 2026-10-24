@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `revision_in_progress`.
 
 NPCI→bank advisory sent when a negotiation round closes and a revised kit is
@@ -22,10 +19,10 @@ logger = logging.getLogger(__name__)
 
 def handle_revision_in_progress(body: TaskReceiveRequest, db: Session) -> dict:
     payload = body.payload or {}
-    authority_change_id = payload.get("change_id", body.change_id or "")
+    npci_change_id = payload.get("change_id", body.change_id or "")
     change = (
         db.query(IncomingChange)
-        .filter(IncomingChange.authority_change_id == authority_change_id)
+        .filter(IncomingChange.npci_change_id == npci_change_id)
         .first()
     )
     if not change:

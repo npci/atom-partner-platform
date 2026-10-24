@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Shared building blocks for the in-process partner agents (feasibility,
 design, code, testing).
 
@@ -117,8 +114,8 @@ def truncate_change_docs(documents: list[dict]) -> str:
 def extract_json(text: str) -> dict | None:
     """Best-effort JSON-object extraction from an LLM reply.
 
-    Handles the three common failure modes seen across providers: plain JSON,
-    markdown-fenced JSON (```json ... ```), and a prose preamble before the object.
+    Handles the three common Claude failure modes: plain JSON, markdown-fenced
+    JSON (```json ... ```), and a prose preamble before the object.
     """
     if not text:
         return None
@@ -149,35 +146,25 @@ def llm_key_present(api_key: str | None) -> bool:
         return bool(_settings.partner_openai_api_key)
     if provider == "ainxt":
         return bool(_settings.partner_ainxt_api_key)
-    if provider == "anthropic":
-        return bool(_settings.partner_anthropic_api_key)
-    return False
+    return bool(_settings.partner_anthropic_api_key)
 
 
 def runtime_override_key(api_key: str | None) -> str | None:
     """Resolve the one-shot key to pass to call_llm: the supplied override for
-    active provider, else None (call_llm falls back to the env key). Returns None and the
+    claude, else None (call_llm falls back to the env key). Returns None and the
     caller should skip when no key exists at all (use llm_key_present first)."""
-    get_provider()  # validate configuration before passing an override
-    return api_key or None
+    provider = get_provider()
+    if provider == "claude" and api_key:
+        return api_key
+    return None
 
 
 def build_meta(frontmatter: dict, model_used: str, *, mock: bool = False) -> dict:
-    """The `_meta` audit block stamped onto every agent report.
-
-    `tokens_used` reflects the most recent call_llm() invocation made by THIS agent
-    run — read from core.llm's per-context usage tracker. 0 for the mock path
-    (no LLM call happened) or a provider that didn't report usage.
-    """
-    tokens_used = 0
-    if not mock:
-        from app.core.llm import last_call_tokens
-        tokens_used = last_call_tokens()
+    """The `_meta` audit block stamped onto every agent report."""
     return {
         "mock": mock,
         "profile_version": frontmatter.get("profile_version", "unknown"),
         "profile_generated_at": frontmatter.get("generated_at"),
         "model_used": model_used,
-        "tokens_used": tokens_used,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

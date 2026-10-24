@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: partner profile (PARTNER.md) — UI-configurable.
 
 The partner's capability profile used to be a read-only file on disk. It is now

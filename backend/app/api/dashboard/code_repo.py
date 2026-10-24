@@ -1,12 +1,9 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: code-repo — register the partner's GitLab repository for
-the Code RAG and trigger indexing.
+the Code RAG (Phase 3.1) and trigger indexing.
 
 The repo source is fetched over the GitLab API, chunked + embedded into
 `document_chunks` (doc_category='code'); the design/code/test agents retrieve it
-for retrieval. The GitLab token is stored write-only in `partner_settings` (key
+(Phase 3.2). The GitLab token is stored write-only in `partner_settings` (key
 'gitlab_token') and never returned.
 """
 import logging
@@ -16,8 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.auth import require_admin
-from app.core.secret_box import encrypt
+from app.api.auth import get_current_user
 from app.database import SessionLocal, get_db
 from app.models import CodeRepo, PartnerSetting, PartnerUser
 from app.rag.code_ingestion import ingest_repo
@@ -40,50 +36,6 @@ class TokenBody(BaseModel):
     token: str
 
 
-def _validate_gitlab_url(raw: str) -> str:
-    """Reject a repo base URL that would leak the GitLab PAT or reach inward.
-
-    `gitlab_url` is not passive configuration: `rag.code_ingestion._gitlab_project`
-    hands it to `gitlab.Gitlab(base, private_token=...)`, which sends the stored
-    `api`-scoped PAT as a `PRIVATE-TOKEN` header to whatever origin this names —
-    and `services.git_integrator` reaches the same constructor on the
-    merge-request path. So an unvalidated value here is simultaneously a
-    credential-exfiltration primitive and an SSRF into internal space.
-
-    This mirrors the `cert_trigger_url` checks in `dashboard/settings.py`, which
-    were added for exactly the same reason and were the only stored URL getting
-    them. Validation happens at ENTRY, where the operator can still act on the
-    message, rather than at fetch time inside a background job.
-    """
-    from urllib.parse import urlparse
-
-    from app.authority_client import _is_private_url, _validate_url_scheme
-
-    url = raw.strip()
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise HTTPException(
-            status_code=400,
-            detail="gitlab_url must be an absolute http(s) URL. Nothing was saved.",
-        )
-    _validate_url_scheme(url, purpose="GitLab repository")
-    # unresolved=False so registering a repo whose host is not up yet stays
-    # possible — this validates WHERE the URL points, not whether it answers.
-    if _is_private_url(url, unresolved=False):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "gitlab_url resolves into blocked (loopback/link-local/private) "
-                "address space and was rejected. Indexing and merge-request "
-                "creation send the stored GitLab token to this host. If it really "
-                "is an internal GitLab, approve it by adding the host to "
-                "AUTHORITY_SSRF_ALLOWED_HOSTS or by setting "
-                "AUTHORITY_SSRF_ALLOW_PRIVATE_NETWORKS=true. Nothing was saved."
-            ),
-        )
-    return url
-
-
 def _repo_view(r: CodeRepo) -> dict:
     return {
         "id": r.id, "label": r.label, "gitlab_repo": r.gitlab_repo,
@@ -96,47 +48,30 @@ def _repo_view(r: CodeRepo) -> dict:
 
 
 def _set_gitlab_token(db: Session, token: str) -> None:
-    # Encrypted at rest — same AES-256-GCM envelope as the Settings-UI
-    # secret fields.
-    encrypted = encrypt(token)
     row = db.get(PartnerSetting, "gitlab_token")
     if row:
-        row.value = encrypted
+        row.value = token
     else:
-        db.add(PartnerSetting(key="gitlab_token", value=encrypted))
+        db.add(PartnerSetting(key="gitlab_token", value=token))
     db.commit()
 
 
 @router.put("/code-repo/token")
 def set_gitlab_token(
     body: TokenBody,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Set the GitLab access token (write-only — stored in partner_settings)."""
     if not body.token.strip():
         raise HTTPException(status_code=400, detail="token is required")
     _set_gitlab_token(db, body.token.strip())
-    # This route writes an `api`-scoped credential and previously emitted
-    # nothing at all — no log line, no event — unlike every comparable secret
-    # write in dashboard/settings.py. Length is not logged either; the fact of
-    # the rotation and the actor are the whole record.
-    from app.core.security_events import emit_security_event
-    emit_security_event(
-        event_name="credential_rotated",
-        severity="medium",
-        boundary="dashboard_code_repo",
-        decision="accepted",
-        reason_code="gitlab_token",
-        actor=user.username,
-    )
-    logger.info("GitLab token set by %s", user.username)
     return {"ok": True}
 
 
 @router.get("/code-repo")
 def list_code_repos(
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """List registered repos + index status. Also reports whether a token is set."""
@@ -148,20 +83,19 @@ def list_code_repos(
 @router.post("/code-repo")
 def create_code_repo(
     body: CodeRepoCreate,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Register a repo for the Code RAG. If `gitlab_token` is supplied it is
     stored write-only. Does not index — call POST /code-repo/{id}/index."""
     if not body.label.strip() or not body.gitlab_repo.strip():
         raise HTTPException(status_code=400, detail="label and gitlab_repo are required")
-    gitlab_url = _validate_gitlab_url(body.gitlab_url) if body.gitlab_url else None
     if body.gitlab_token:
         _set_gitlab_token(db, body.gitlab_token.strip())
     repo = CodeRepo(
         label=body.label.strip(), gitlab_repo=body.gitlab_repo.strip(),
         gitlab_branch=(body.gitlab_branch or "main").strip(),
-        gitlab_url=gitlab_url, languages=(body.languages or None),
+        gitlab_url=(body.gitlab_url or None), languages=(body.languages or None),
     )
     db.add(repo)
     db.commit()
@@ -172,7 +106,7 @@ def create_code_repo(
 @router.delete("/code-repo/{repo_id}")
 def delete_code_repo(
     repo_id: str,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Delete a repo + its indexed code chunks."""
@@ -201,7 +135,7 @@ def _index_job(repo_id: str) -> None:
 def index_code_repo(
     repo_id: str,
     bg: BackgroundTasks,
-    user: PartnerUser = Depends(require_admin),
+    user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Kick a background full re-index. Returns immediately; poll GET /code-repo

@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Inbound A2A handler: `clarification_response`.
 
 Sub-modes discriminated by `payload.message_kind` (protocol-v1 extensions):
@@ -32,7 +29,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
     `payload.message_kind`: 'COUNTER_PROPOSAL' means counter, anything
     else (or absent) is a regular clarification."""
     payload = body.payload or {}
-    # Current wire shape: full A2A wrapper with {task_type, payload, …}.
+    # Wire shape post-Slice-8: full A2A wrapper with {task_type, payload, …}.
     inner = payload.get("payload") if isinstance(payload.get("payload"), dict) else payload
     change_id = inner.get("change_id") or payload.get("change_id") or body.change_id
 
@@ -43,7 +40,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
     if inner.get("message_kind") == "COUNTER_PROPOSAL":
         change = (
             db.query(IncomingChange)
-            .filter(IncomingChange.authority_change_id == change_id)
+            .filter(IncomingChange.npci_change_id == change_id)
             .first()
         )
         if change:
@@ -55,17 +52,17 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
                 "received_at":         datetime.now(timezone.utc).isoformat(),
                 "status":              "open",
             }
-            change.authority_counter = json.dumps(counter_payload)
+            change.npci_counter = json.dumps(counter_payload)
             # Surface in the decision panel — back to negotiating from
             # whatever the prior state was.
             change.decision = "negotiating"
             db.commit()
             logger.info(
-                "Authority counter received: change=%s round=%s",
+                "NPCI counter received: change=%s round=%s",
                 change.id, counter_payload.get("negotiation_round"),
             )
             return {"status": "accepted", "message": "Counter-proposal received"}
-        logger.warning("Authority counter for unknown change %s", change_id)
+        logger.warning("NPCI counter for unknown change %s", change_id)
         return {"status": "accepted", "message": "Counter-proposal received (no matching change)"}
 
     # ── NPCI round-closed notice ─────────────────────────────────────
@@ -74,7 +71,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
     if inner.get("message_kind") == "ROUND_CLOSED":
         change = (
             db.query(IncomingChange)
-            .filter(IncomingChange.authority_change_id == change_id)
+            .filter(IncomingChange.npci_change_id == change_id)
             .first()
         )
         if change:
@@ -86,7 +83,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
                     notices = []
             notices.append({
                 "negotiation_round": inner.get("negotiation_round"),
-                "message":           inner.get("response") or "The authority closed this negotiation round.",
+                "message":           inner.get("response") or "NPCI closed this negotiation round.",
                 "closed_at":         inner.get("closed_at"),
                 "received_at":       datetime.now(timezone.utc).isoformat(),
             })
@@ -105,7 +102,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
         req_label = inner.get("requirement", "")
         reason = inner.get("reason", "")
         corr_id_v = inner.get("correlation_id") or payload.get("correlation_id")
-        change_ids_sub_v = db.query(IncomingChange.id).filter(IncomingChange.authority_change_id == change_id)
+        change_ids_sub_v = db.query(IncomingChange.id).filter(IncomingChange.npci_change_id == change_id)
         query_v = None
         if corr_id_v:
             query_v = (
@@ -168,7 +165,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
 
     change_ids_subq = (
         db.query(IncomingChange.id)
-          .filter(IncomingChange.authority_change_id == change_id)
+          .filter(IncomingChange.npci_change_id == change_id)
     )
 
     query = None
@@ -206,15 +203,15 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
         if channel == "general" and query.response:
             # Follow-up reply to an already-answered general question.
             # Don't clobber the first answer — append to the change's
-            # authority_followups log so the timeline shows every NPCI reply,
+            # npci_followups log so the timeline shows every NPCI reply,
             # the way the NPCI side keeps each PO_APPROVED message. (Cert
             # channel keeps the single-response shape; it has its own
             # inbox that reads OutgoingQuery.response directly.)
             change = db.get(IncomingChange, query.change_id)
             followups = []
-            if change and change.authority_followups:
+            if change and change.npci_followups:
                 try:
-                    followups = json.loads(change.authority_followups) or []
+                    followups = json.loads(change.npci_followups) or []
                 except (json.JSONDecodeError, TypeError):
                     followups = []
             followups.append({
@@ -223,7 +220,7 @@ def handle_clarification_response(body: TaskReceiveRequest, db: Session) -> dict
                 "received_at": now.isoformat(),
             })
             if change:
-                change.authority_followups = json.dumps(followups)
+                change.npci_followups = json.dumps(followups)
         else:
             query.response = response_text
             query.status = "answered"

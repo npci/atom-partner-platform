@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Partner platform `AgentExecutor` — JSON-RPC server-side dispatcher.
 
 Receives an A2A `Task` from NPCI, reads `task_type` + `payload` from
@@ -8,8 +5,8 @@ the message's data Part, and dispatches to the existing handler
 functions in `app.api.a2a` (`_handle_change_communication`,
 `_handle_clarification_response`).
 
-Zero business logic is duplicated here — a later change will move the
-handler bodies into this file once the legacy router is decommissioned.
+Zero business logic is duplicated here — Slice 8 will move the handler
+bodies into this file once the legacy router is decommissioned.
 
 Message data shape (NPCI → partner):
     {
@@ -18,9 +15,9 @@ Message data shape (NPCI → partner):
       "payload":    {...}                     // task-specific body
     }
 
-Auth note: the partner side's legacy `POST /api/a2a/tasks/send`
+Auth note (Slice 4): the partner side's legacy `POST /api/a2a/tasks/send`
 has no auth at all today (relies on network ACLs). The SDK path
-preserves that — a later change generalises Bearer JWT validation across
+preserves that — Slice 5/6 generalises Bearer JWT validation across
 both backends.
 
 Outbound task types (`query`, `progress`, `readiness`) are NOT
@@ -59,7 +56,6 @@ _INBOUND_TASK_TYPES = {
     "round_closed",
     "blocker_resolution",
     "blocker_status_update",
-    "cert_execution_start",
     "cert_signoff_notification",
     "cert_completion_signoff",
     # Dispatched since WS8 but never listed here — same omission class as the
@@ -78,20 +74,20 @@ _INBOUND_TASK_TYPES = {
     "cert_setup_notification",
     "cert_case_result",
     "cert_verdict_notification",
-    # Integration-testing tunnel (ITA I-1). Must be listed here as well as in
-    # HANDLER_TASK_TYPES: a type that is dispatched but not RECOGNISED falls
-    # through to the generic ack branch, which reports success while doing
-    # nothing — the exact misreport
-    # test_cert_task_types_are_recognised_inbound exists to catch.
-    "http_exchange_request",
     # Recognised but not yet richly handled — accepted with a no-op ack; full
     # handling (status reports, waiver-decision UI, etc.) lands with the Phase 6
     # cert UI that consumes them.
     "milestone_status_request",
     "milestone_status_report",
     "cert_waiver_decision",
+    "cert_verdict_dispute_response",
+    "cert_completion_report",
     "cert_status_request",
     "cert_status_report",
+    # Txn over A2A relay legs — processed by the txn_ingress interception in
+    # execute(); the registry stubs below are only the refuse-loudly fallback.
+    "txn_request",
+    "txn_response",
 }
 
 
@@ -116,15 +112,15 @@ HANDLER_TASK_TYPES = frozenset({
     "cert_config_request",
     "cert_setup_notification",
     "cert_verdict_notification",
+    "cert_waiver_decision",
+    "cert_verdict_dispute_response",
+    "cert_completion_report",
     "negotiation_frozen",
     "revision_in_progress",
     "round_opened",
     "round_closed",
-    # Integration-testing tunnel (ITA I-1). Dispatched OFF the event loop —
-    # see the `run_in_thread` branch in execute().
-    "http_exchange_request",
-    # ITA I-6: the authority's start signal for the partner-initiated half.
-    "cert_execution_start",
+    "txn_request",
+    "txn_response",
 })
 
 
@@ -142,10 +138,12 @@ def build_handler_registry() -> dict:
         handle_cert_case_result,
         handle_cert_completion_signoff,
         handle_cert_config_request,
-        handle_cert_execution_start,
         handle_cert_setup_notification,
         handle_cert_test_response,
         handle_cert_verdict_notification,
+        handle_cert_waiver_decision,
+        handle_cert_verdict_dispute_response,
+        handle_cert_completion_report,
         handle_change_communication,
         handle_clarification_response,
         handle_counter_decision,
@@ -153,8 +151,9 @@ def build_handler_registry() -> dict:
         handle_revision_in_progress,
         handle_round_closed,
         handle_round_opened,
+        handle_txn_request,
+        handle_txn_response,
     )
-    from app.services.integration_testing.egress import handle_http_exchange_request
 
     return {
         "change_communication":      handle_change_communication,
@@ -171,13 +170,16 @@ def build_handler_registry() -> dict:
         "cert_case_result":          handle_cert_case_result,
         "cert_config_request":       handle_cert_config_request,
         "cert_setup_notification":   handle_cert_setup_notification,
-        "cert_execution_start":      handle_cert_execution_start,
         "cert_verdict_notification": handle_cert_verdict_notification,
+        "cert_waiver_decision":      handle_cert_waiver_decision,
+        "cert_verdict_dispute_response": handle_cert_verdict_dispute_response,
+        "cert_completion_report":    handle_cert_completion_report,
         "negotiation_frozen":        handle_negotiation_frozen,
         "revision_in_progress":      handle_revision_in_progress,
         "round_opened":              handle_round_opened,
         "round_closed":              handle_round_closed,
-        "http_exchange_request":     handle_http_exchange_request,
+        "txn_request":               handle_txn_request,
+        "txn_response":              handle_txn_response,
     }
 
 
@@ -231,10 +233,40 @@ class PartnerAgentExecutor(AgentExecutor):
             await self._fail(updater, "Missing 'task_type' in message data")
             return
 
+        # ── 1b. txn relay legs + run-window tracking ──
+        # Intercepted before handler dispatch: the switch's ACK (or a named fault)
+        # IS the reply artifact, and the ingress needs the full envelope
+        # (message_id for dedup) which handlers never see. No DB involved.
+        try:
+            if task_type in ("txn_request", "txn_response"):
+                from app.a2a_common import txn_ingress
+                try:
+                    reply = await txn_ingress.process_inbound_txn(data)
+                except ValueError as exc:
+                    await self._fail(updater, f"payload_validation_error: {exc}")
+                    return
+                await updater.add_artifact(
+                    parts=[_dict_to_part(reply)], name="txn-reply", last_chunk=True,
+                )
+                await updater.complete()
+                return
+
+            # The Egress run window keys off the conversation this partner already
+            # has: setup opens it, sign-off/abort close it.
+            from app.a2a_common import txn_state
+            txn_state.observe_conversation(
+                task_type, env.cflow_id,
+                identity=payload.get("identity") if isinstance(payload, dict) else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("partner_a2a_txn_error task_type=%s", task_type)
+            await self._fail(updater, f"Executor error: {exc}")
+            return
+
         # ── 2. dispatch ──
         # Imports are inside the function so this module imports cleanly
         # in the test harness without dragging the whole FastAPI app.
-        # Handler bodies live in `partner_handlers`; the
+        # Slice 8 — handler bodies live in `partner_handlers`; the
         # legacy `app.api.a2a` is deleted.
         from app.a2a_common.handlers import TaskReceiveRequest
         from app.database import SessionLocal
@@ -244,8 +276,8 @@ class PartnerAgentExecutor(AgentExecutor):
             db = SessionLocal()
 
             # Re-pack into the legacy `TaskReceiveRequest` so we can
-            # call the existing handlers verbatim. A later change will
-            # inline the handler bodies and drop this re-pack.
+            # call the existing handlers verbatim. Slice 8 will inline
+            # the handler bodies and drop this re-pack.
             body = TaskReceiveRequest(
                 task_type=task_type,
                 change_id=change_id,
@@ -253,6 +285,7 @@ class PartnerAgentExecutor(AgentExecutor):
                 task_id=context.task_id,
                 message_id=env.message_id,
                 correlation_id=env.correlation_id,
+                cflow_id=env.cflow_id,
             )
 
             logger.info(
@@ -265,25 +298,13 @@ class PartnerAgentExecutor(AgentExecutor):
             # if/elif chain). See build_handler_registry() above.
             handlers = build_handler_registry()
             handler = handlers.get(task_type)
-            if handler is not None and payload:
-                if getattr(handler, "run_in_thread", False):
-                    # A handler that declares `run_in_thread` blocks for longer
-                    # than a request should hold the event loop — the tunnel
-                    # egress makes an HTTP call that may legitimately take 60s
-                    # (ITA §6). Running it inline freezes this platform for the
-                    # duration; with several cert cases in flight it stops
-                    # answering anything at all.
-                    #
-                    # Thread dispatch rather than an `async def` handler,
-                    # because making handlers async requires the outbound
-                    # sender to be async first (ITA-3): an async handler that
-                    # reaches today's `authority_client` hits `asyncio.run` inside a
-                    # running loop and raises. Revisit when ITA-3 lands.
-                    import anyio
-
-                    result = await anyio.to_thread.run_sync(handler, body, db)
-                else:
-                    result = handler(body, db)
+            # Some cert-lifecycle task types are empty-by-spec (§5.1
+            # cert_config_request has no payload — it is the request itself
+            # that carries the semantics) and their handlers exist precisely
+            # to build the reply. Don't gate those on payload truthiness.
+            _EMPTY_PAYLOAD_OK = {"cert_config_request"}
+            if handler is not None and (payload or task_type in _EMPTY_PAYLOAD_OK):
+                result = handler(body, db)
             elif task_type in _INBOUND_TASK_TYPES:
                 # Recognised type but missing payload — accept and no-op.
                 result = {"status": "accepted", "message": f"Task type '{task_type}' received without payload"}
@@ -292,6 +313,14 @@ class PartnerAgentExecutor(AgentExecutor):
                 # acknowledge but no-op (legacy fall-through).
                 result = {"status": "accepted", "message": f"Task type '{task_type}' received"}
 
+            # The switch adapter's last look at the reply (no-op for a plain one).
+            from app.adapters import get_switch_adapter
+            adapter = get_switch_adapter()
+            result = await adapter.on_reply(
+                task_type, payload or {}, result,
+                change_id=change_id, cflow_id=env.cflow_id,
+            )
+
             # ── 3. emit response artifact ──
             await updater.add_artifact(
                 parts=[_dict_to_part(result)],
@@ -299,6 +328,17 @@ class PartnerAgentExecutor(AgentExecutor):
                 last_chunk=True,
             )
             await updater.complete()
+
+            # After the reply has gone: NPCI is no longer blocked, so slow
+            # follow-up work belongs here. It must never turn a delivered reply
+            # into a failure.
+            try:
+                await adapter.after_reply(
+                    task_type, payload or {}, result,
+                    change_id=change_id, cflow_id=env.cflow_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("switch adapter after_reply failed task_type=%s", task_type)
 
         except Exception as exc:  # noqa: BLE001
             logger.exception(

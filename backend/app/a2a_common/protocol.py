@@ -1,16 +1,3 @@
-# >>> a2a-core vendored header >>>
-# GENERATED FILE — DO NOT EDIT HERE. Your change will be overwritten.
-#
-# Canonical source: packages/a2a-core/a2a_common/protocol.py
-# Edit there, then run: scripts/ci/sync-a2a-core.sh
-#
-# This is security-critical A2A wire code shared byte-for-byte across services
-# that cannot import each other (separate Docker build contexts). A fix applied
-# to one copy and forgotten on the others is the failure mode this guards.
-# <<< a2a-core vendored header <<<
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """A2A wire protocol v1 — the single source of truth for the message contract.
 
 Implements `A2A_PROTOCOL_DESIGN.pdf` (v1.0): 28 typed messages + `echo`, one
@@ -19,11 +6,10 @@ common envelope, 22 structured error codes, and per-message metadata
 module is *authoritative* — the drift test (`tests/a2a_common/test_protocol_contract.py`)
 asserts the frozen 28 here match the PDF appendix exactly.
 
-MIRROR: this file is byte-identical with the partner platform's copy, which lives
-in its own repository   and is not
-covered by this repo's sync + hygiene gate. Change one, change both.
+MIRROR: this file is byte-identical with
+`partner-platform/backend/app/a2a_common/protocol.py`. Change one, change both.
 
-Deltas from the frozen PDF:
+Deltas from the frozen PDF (see `docs/A2A_PROTOCOL_MIGRATION.md` for rationale):
   1. envelope carries `protocol_version`
   2. envelope carries `message_id` — the uniform dedup/idempotency key
   3. `echo` uses the full envelope like every other message
@@ -35,7 +21,7 @@ lands (Phases 2–4); until then a payload validates against the permissive
 `PayloadBase` (extra fields allowed, matching the "preserve extensions" decision).
 
 Pure module: stdlib + pydantic only. No SDK, no app models, no DB — so it
-imports cleanly in both the authority app graph and the partner SQLite harness.
+imports cleanly in both the NPCI app graph and the partner SQLite harness.
 """
 from __future__ import annotations
 
@@ -47,29 +33,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # Bump on any breaking envelope/contract change. Delta #1.
 PROTOCOL_VERSION = "1.0"
 
-# The cert-agent is not a distinct wire identity — it signs as the authority
-# platform. Outbound cert-agent messages set from=SENDER_AUTHORITY and
+# The cert-agent is not a distinct wire identity — it signs as the NPCI
+# platform. Outbound cert-agent messages set from=SENDER_NPCI and
 # agent_id=CERT_ORCHESTRATOR_AGENT_ID (PDF §3 caution).
-SENDER_AUTHORITY = "authority-platform"
-CERT_ORCHESTRATOR_AGENT_ID = "authority.cert_orchestrator.v1"
-
-# Superseded spellings. ACCEPTED on inbound only — never emitted. Same reason as
-# the X-Auth-* header rename: the counterparty deploys separately, so a value
-# that both sides compare against cannot flip atomically. A receiver that treats
-# these as equivalent lets the two repos roll out independently.
-LEGACY_SENDER_AUTHORITY = "npci-platform"
-LEGACY_CERT_ORCHESTRATOR_AGENT_ID = "npci.cert_orchestrator.v1"
-
-
-def is_authority_sender(value: str | None) -> bool:
-    """True for the current sender id and for the superseded one."""
-    return (value or "").strip() in (SENDER_AUTHORITY, LEGACY_SENDER_AUTHORITY)
-
-
-def is_cert_orchestrator_agent(value: str | None) -> bool:
-    """True for the current cert-orchestrator agent id and the superseded one."""
-    return (value or "").strip() in (
-        CERT_ORCHESTRATOR_AGENT_ID, LEGACY_CERT_ORCHESTRATOR_AGENT_ID)
+SENDER_NPCI = "npci-platform"
+CERT_ORCHESTRATOR_AGENT_ID = "npci.cert_orchestrator.v1"
 
 
 class A2ATaskType(str, enum.Enum):
@@ -119,29 +87,50 @@ class A2ATaskType(str, enum.Enum):
     # --- v1.0+ext (not in the frozen 28) ---
     CERT_WITNESS_REQUEST   = "cert_witness_request"
     CERT_WITNESS_SCHEDULED = "cert_witness_scheduled"
-    # Authority→partner advisory: a kit revision is in progress (round closed, new
+    # NPCI→bank advisory: a kit revision is in progress (round closed, new
     # version being prepared). Partners hold queries until it ships.
     REVISION_IN_PROGRESS   = "revision_in_progress"
-    # Authority→partner per-partner round lifecycle notices. Round-state lives
-    # only on the authority side (`negotiation_round_states`); these give the partner a
+    # NPCI→bank per-partner round lifecycle notices. Round-state lives only on
+    # the NPCI side (`negotiation_round_states`); these give the partner a
     # first-class signal of "you're in round N, deadline T" and "round N is
     # closed because X" so it stays in sync when a round transitions without a
     # coinciding kit dispatch (PM force-advance, silent-acceptance sweep).
     ROUND_OPENED           = "round_opened"
     ROUND_CLOSED           = "round_closed"
-    # Integration-testing tunnel (ITA I-0). One ENCAPSULATED HTTP exchange,
-    # direction EITHER so a single pair serves both the forward and the reverse
-    # flow. The response normally rides the synchronous reply;
-    # HTTP_EXCHANGE_RESPONSE exists for the deferred case (ITA plan §7).
-    HTTP_EXCHANGE_REQUEST  = "http_exchange_request"
-    HTTP_EXCHANGE_RESPONSE = "http_exchange_response"
-    # ITA I-6 (§3.4): the START SIGNAL for the partner-initiated half of a
-    # suite — which case ids the partner owns, the suite deadline, and the
-    # alias its system under test calls back through. A DISTINCT instruction,
-    # deliberately not folded into CERT_SETUP_NOTIFICATION: "here is the
-    # suite" and "begin now" are separated in the requirement because test-
-    # data validation sits between them.
-    CERT_EXECUTION_START   = "cert_execution_start"
+    # Certification transactions over A2A (docs/upi_over_a2a_plan.md): the
+    # Egress/Ingress wrappers relay the engines' signed XML between switches as
+    # opaque base64. Direction is not fixed per type — it derives from
+    # (task_type, payload.initiated_by) via txn_direction(); a mismatch with
+    # the authenticated caller is refused as WRONG_DIRECTION.
+    TXN_REQUEST            = "txn_request"
+    TXN_RESPONSE           = "txn_response"
+    # Consolidated results pull: the bank asks for the outcomes of the batch it
+    # declared ready; NPCI answers with ONE cert_case_result-shaped body
+    # (results[] + pending[]). Additive — the per-case push stays.
+    CERT_VAL_REQUEST   = "cert_val_request"
+    # 2026-10-12 — bank-driven completion + signoff pair. The bank uses these
+    # when it believes it has finished the certification; NPCI's handlers
+    # compile a per-case report and (for signoff) fire cert_signoff_notification
+    # when every applicable case is complete (pass or waiver-granted). The
+    # report is sent on both the completion-check path AND the signoff path, so
+    # a bank that skips straight to signoff still gets the ledger. See
+    # `backend/app/services/cert_completion_report.py` + the two handlers in
+    # `backend/app/a2a_common/npci_handlers.py`.
+    CERT_COMPLETION_CHECK_REQUEST = "cert_completion_check_request"
+    CERT_COMPLETION_REPORT        = "cert_completion_report"
+    CERT_SIGNOFF_REQUEST          = "cert_signoff_request"
+    # 2026-10-12 — dispute flow. The bank disputes a verdict with
+    # `cert_verdict_dispute` (already in Part B above); NPCI's dispute
+    # analyser agent decides whether the verdict stands and replies with
+    # `cert_verdict_dispute_response`. After reading the justification the
+    # bank either disputes again or accepts via `cert_verdict_acceptance`;
+    # the subsequent `cert_fix_notification` carries the list of cases
+    # the bank has fixed and asks NPCI to re-execute (NPCI-initiated) or
+    # signals the bank will re-fire (bank-initiated).
+    CERT_VERDICT_DISPUTE_RESPONSE = "cert_verdict_dispute_response"
+    CERT_VERDICT_ACCEPTANCE       = "cert_verdict_acceptance"
+    # v1.2 — NPCI's consolidated results (renamed from cert_case_result).
+    CERT_TEST_RESPONSE            = "cert_test_response"
 
     def is_ext(self) -> bool:
         return self in _EXT_TASK_TYPES
@@ -154,36 +143,23 @@ _EXT_TASK_TYPES = frozenset(
         A2ATaskType.REVISION_IN_PROGRESS,
         A2ATaskType.ROUND_OPENED,
         A2ATaskType.ROUND_CLOSED,
-        A2ATaskType.HTTP_EXCHANGE_REQUEST,
-        A2ATaskType.HTTP_EXCHANGE_RESPONSE,
-        A2ATaskType.CERT_EXECUTION_START,
+        A2ATaskType.TXN_REQUEST,
+        A2ATaskType.TXN_RESPONSE,
+        A2ATaskType.CERT_VAL_REQUEST,
+        A2ATaskType.CERT_COMPLETION_CHECK_REQUEST,
+        A2ATaskType.CERT_COMPLETION_REPORT,
+        A2ATaskType.CERT_SIGNOFF_REQUEST,
+        A2ATaskType.CERT_VERDICT_DISPUTE_RESPONSE,
+        A2ATaskType.CERT_VERDICT_ACCEPTANCE,
+        A2ATaskType.CERT_TEST_RESPONSE,
     }
 )
 
 
 class Direction(str, enum.Enum):
-    # The VALUES stay branded for now: they are matched byte-for-byte by the
-    # separately-deployed certification rig and sit in stored rows, so flipping
-    # what is EMITTED needs that consumer to move first. What CAN move today is
-    # acceptance — `_missing_` below lets the neutral spellings parse, so the
-    # emit side can flip later without a coordinated deploy. Same accept-first
-    # rollout as hmac_signer's X-Auth-* headers and LEGACY_SENDER_AUTHORITY.
-    AUTHORITY_TO_PARTNER = "npci_to_bank"
-    PARTNER_TO_AUTHORITY = "bank_to_npci"
+    NPCI_TO_BANK = "npci_to_bank"
+    BANK_TO_NPCI = "bank_to_npci"
     EITHER       = "either"
-
-    @classmethod
-    def _missing_(cls, value):
-        return _DIRECTION_ALIASES.get(value)
-
-
-# Neutral spellings, ACCEPTED on parse only — never emitted until the rig reads
-# them. Module-level (not a nested dict) so the pair is greppable next to the
-# values it aliases.
-_DIRECTION_ALIASES = {
-    "authority_to_partner": Direction.AUTHORITY_TO_PARTNER,
-    "partner_to_authority": Direction.PARTNER_TO_AUTHORITY,
-}
 
 
 class CorrelationKey(str, enum.Enum):
@@ -224,29 +200,26 @@ class ErrorCode(str, enum.Enum):
     # Protocol / schema
     UNKNOWN_TASK_TYPE       = "unknown_task_type"
     PAYLOAD_VALIDATION_ERROR = "payload_validation_error"
-    # Validation. The two BANK_* values keep their spelling on emit — partner
-    # SOC detection rules key on the literal strings — but the neutral
-    # spellings are accepted on parse via `_missing_`, so emission can flip
-    # after a deprecation window without another code change on the read side.
+    # Validation
     BANK_IDENTITY_MISMATCH  = "bank_identity_mismatch"
     CERT_FINGERPRINT_MISMATCH = "cert_fingerprint_mismatch"
     BANK_UNREACHABLE        = "bank_unreachable"
+    # 2026-10-12 — cert_config_submission field-level validation (Phase V1).
+    # Emitted by backend/app/services/cert_config_validation.py when the
+    # bank's submission fails a format / consistency / cross-ref / business
+    # rule. BANK_IDENTITY_MISMATCH above now carries the (psp_org_id vs
+    # target_identity.org_id) semantics the orchestrator used to spell
+    # inline — one canonical name across handler + orchestrator paths.
+    INVALID_CONFIG_FIELD    = "invalid_config_field"
+    CONFIG_INCONSISTENT     = "config_inconsistent"
+    UNKNOWN_SUBSET          = "unknown_subset"
+    BANK_ID_MISMATCH        = "bank_id_mismatch"
     # Handler
     EXECUTOR_ERROR = "executor_error"
-
-    @classmethod
-    def _missing_(cls, value):
-        return _ERROR_CODE_ALIASES.get(value)
 
     @property
     def layer(self) -> str:
         return _ERROR_LAYERS[self]
-
-
-_ERROR_CODE_ALIASES = {
-    "partner_identity_mismatch": ErrorCode.BANK_IDENTITY_MISMATCH,
-    "partner_unreachable":       ErrorCode.BANK_UNREACHABLE,
-}
 
 
 _ERROR_LAYERS: dict[ErrorCode, str] = {
@@ -271,6 +244,10 @@ _ERROR_LAYERS: dict[ErrorCode, str] = {
     ErrorCode.BANK_IDENTITY_MISMATCH: "validation",
     ErrorCode.CERT_FINGERPRINT_MISMATCH: "validation",
     ErrorCode.BANK_UNREACHABLE: "validation",
+    ErrorCode.INVALID_CONFIG_FIELD: "validation",
+    ErrorCode.CONFIG_INCONSISTENT: "validation",
+    ErrorCode.UNKNOWN_SUBSET: "validation",
+    ErrorCode.BANK_ID_MISMATCH: "validation",
     ErrorCode.EXECUTOR_ERROR: "handler",
 }
 
@@ -297,198 +274,72 @@ class MessageSpec:
     correlation_key: CorrelationKey
     cardinality: str
     ext: bool = False
-    # ── PII classification (Tier 2) ────────────────────────────────────────
-    #
-    # True when this message type is DESIGNED to carry partner-authored free
-    # text or an account/transaction reference — i.e. content a consumer's PII
-    # could legitimately appear in. This is a DESIGN-TIME judgement recorded by
-    # a reviewer, deliberately NOT a runtime inference: Tier 1's regex filter
-    # already does the runtime guessing, and its whole weakness is that it can
-    # only catch what its patterns match. Tagging the CONTRACT means a message
-    # type known to carry PII gets mandatory filtering even when the heuristic
-    # would have found nothing.
-    #
-    # Defaults False so this field is additive — it does not disturb the frozen
-    # direction/correlation contract the drift test guards. But "unclassified"
-    # is NOT allowed to mean "no PII": `PII_CLASSIFICATION_RATIONALE` below
-    # must contain an entry for every task type, and a test enforces that, so a
-    # newly-added message type fails CI until a human has actually decided.
-    carries_pii: bool = False
 
 
-def _spec(tt, d, ck, card, ext=False, carries_pii=False) -> MessageSpec:
-    return MessageSpec(tt, d, ck, card, ext, carries_pii)
+def _spec(tt, d, ck, card, ext=False) -> MessageSpec:
+    return MessageSpec(tt, d, ck, card, ext)
 
 
 _T = A2ATaskType
 _D = Direction
 _C = CorrelationKey
 
-# ── PII classification rationale (Tier 2) ────────────────────────────────────
-#
-# One entry per task type, REQUIRED. `test_every_task_type_has_a_pii_rationale`
-# fails if a task type is missing, so adding a message to the enum forces a
-# human decision instead of silently inheriting `carries_pii=False`. That
-# default-deny-by-omission failure mode is the main thing this table prevents.
-#
-# The judgement applied: does this message type, BY DESIGN, carry
-# partner-authored free text or an account/transaction reference? "A partner
-# could stuff anything anywhere" is not the test — Tier 1's heuristic filter
-# covers that residual case. This is about what the CONTRACT says the message
-# is for.
-PII_CLASSIFICATION_RATIONALE: dict[A2ATaskType, str] = {
-    # ── Carries PII by design ────────────────────────────────────────────────
-    _T.QUERY: "Partner-authored free-text question. May quote a live transaction "
-              "or account holder to illustrate the issue being asked about.",
-    _T.CLARIFICATION_RESPONSE: "The Authority's free-text answer to a QUERY; quotes the "
-                               "question's context back, so it inherits the query's exposure.",
-    _T.COUNTER_PROPOSAL: "Partner-authored justification free text. Already the "
-                         "surface Tier 1 wires redaction into "
-                         "(agents/negotiation_classifier.py).",
-    _T.COUNTER_DECISION: "The Authority's free-text reasoning on a counter-proposal; "
-                         "restates partner-supplied justification.",
-    _T.BLOCKER: "Partner-authored description of what is blocking them — the "
-                "message most likely to include a concrete failing transaction.",
-    _T.BLOCKER_STATUS_UPDATE: "Free-text progress narrative on a blocker.",
-    _T.BLOCKER_RESOLUTION: "Free-text resolution narrative on a blocker.",
-    _T.CERT_CASE_RESULT: "Carries per-case request/response bodies from real network "
-                         "switch traffic (see api/phase_c.py::cert_txns) — "
-                         "VPAs, account references and mobile numbers are the "
-                         "expected content, not an accident.",
-    _T.CERT_VERDICT_DISPUTE: "Partner-authored free-text dispute, typically "
-                             "quoting the transaction the verdict was based on.",
-    _T.CERT_WAIVER_REQUEST: "Partner-authored free-text justification for waiving "
-                            "a failing case.",
-    _T.CERT_VERDICT_NOTIFICATION: "Authority verdict text citing the failing case's "
-                                  "observed values.",
-    _T.CERT_TEST_PREPARATION: "Partner-supplied test data descriptions; test "
-                              "accounts and VPAs are the point of the message.",
-    _T.CERT_CONFIG_SUBMISSION: "Partner-supplied connectivity/config values, which "
-                               "in practice include test account identifiers.",
-    _T.CHANGE_COMMUNICATION: "Carries BRD/TSD document content, classified "
-                             "PII-POSSIBLE in §2 of the classification doc.",
-    _T.HTTP_EXCHANGE_REQUEST: "Carries an ENCAPSULATED HTTP request verbatim — "
-                              "arbitrary body bytes plus forwarded Authorization "
-                              "and Cookie headers (ITA plan §5.3 forwards them "
-                              "deliberately, because a tunnel that strips "
-                              "credentials cannot test anything). Under a cert "
-                              "run the body IS live switch traffic. This is the "
-                              "one message type whose whole purpose is to carry "
-                              "someone else's bytes untouched, so it is "
-                              "PII-bearing by construction, not by accident.",
-    _T.HTTP_EXCHANGE_RESPONSE: "The encapsulated HTTP response, same reasoning "
-                               "as the request: verbatim third-party body and "
-                               "headers, including Set-Cookie.",
-
-    # ── Does NOT carry PII by design ─────────────────────────────────────────
-    _T.PROPOSAL_ACKNOWLEDGED: "Receipt only: change_id + version_received.",
-    _T.CHANGE_ACKNOWLEDGEMENT: "Acceptance only: change_id + version_accepted.",
-    _T.MILESTONE_UPDATE: "Milestone enum + timestamp.",
-    _T.MILESTONE_STATUS_REQUEST: "Request for status; carries identifiers only.",
-    _T.MILESTONE_STATUS_REPORT: "Milestone states + timestamps.",
-    _T.CERT_READINESS_DECLARATION: "Readiness flag + version_implementing.",
-    _T.CERT_CONFIG_REQUEST: "The Authority asking the partner to submit config; no partner "
-                            "content yet.",
-    _T.CERT_SETUP_NOTIFICATION: "Environment/attempt identifiers.",
-    _T.CERT_WAIVER_DECISION: "Approve/reject + waiver_request_id.",
-    _T.CERT_FIX_NOTIFICATION: "Which cases were fixed, by id.",
-    _T.CERT_SIGNOFF_NOTIFICATION: "Terminal sign-off flag.",
-    _T.CERT_STATUS_REQUEST: "Asks for the current cert-run status; carries the "
-                            "cflow_id and cert_attempt only, no partner content.",
-    _T.CERT_STATUS_REPORT: "Aggregate counts and lifecycle states; no per-case "
-                           "request/response bodies (those ride CERT_CASE_RESULT).",
-    _T.CERT_RUN_ABORT: "Abort reason code + identifiers.",
-    _T.ECHO: "Connectivity probe used to verify the wire is up; the payload is "
-             "an opaque round-trip token, not partner business content.",
-    _T.CERT_WITNESS_REQUEST: "Scheduling request — session identifiers/times.",
-    _T.CERT_WITNESS_SCHEDULED: "Scheduling confirmation — times and identifiers.",
-    _T.REVISION_IN_PROGRESS: "Advisory flag that a kit revision is underway.",
-    _T.ROUND_OPENED: "Round number + deadline.",
-    _T.ROUND_CLOSED: "Round number + close reason code.",
-    # NOTE: HTTP_EXCHANGE_REQUEST/RESPONSE deliberately do NOT appear in this
-    # section — they are PII-bearing (see above). Duplicate keys here would
-    # silently OVERWRITE the security rationale, which is exactly what an
-    # earlier revision of this dict did.
-    _T.CERT_EXECUTION_START: "Start signal for the partner-initiated half of a "
-                             "suite: case ids, the suite deadline and the "
-                             "callback ALIAS — identifiers only; the case DATA "
-                             "already travelled on CERT_TEST_PREPARATION.",
-}
-
-# Derived from the table above so the two can never disagree: the set of task
-# types whose content MUST be filtered before reaching an external LLM.
-PII_BEARING_TASK_TYPES: frozenset = frozenset({
-    _T.QUERY, _T.CLARIFICATION_RESPONSE,
-    _T.COUNTER_PROPOSAL, _T.COUNTER_DECISION,
-    _T.BLOCKER, _T.BLOCKER_STATUS_UPDATE, _T.BLOCKER_RESOLUTION,
-    _T.CERT_CASE_RESULT, _T.CERT_VERDICT_DISPUTE, _T.CERT_WAIVER_REQUEST,
-    _T.CERT_VERDICT_NOTIFICATION, _T.CERT_TEST_PREPARATION,
-    _T.CERT_CONFIG_SUBMISSION, _T.CHANGE_COMMUNICATION,
-    _T.HTTP_EXCHANGE_REQUEST, _T.HTTP_EXCHANGE_RESPONSE,
-})
-
-
-def carries_pii(task_type) -> bool:
-    """True if this task type is classified as PII-bearing by design.
-
-    Accepts an `A2ATaskType` or its raw wire string, because callers on the
-    inbound path often hold the string form straight off the envelope. An
-    UNKNOWN string returns True — fail CLOSED. An unrecognised task type is
-    either a protocol addition that has not been classified yet or a malformed
-    inbound message; treating either as "no PII" would be the exact silent
-    downgrade this classification exists to prevent.
-    """
-    if isinstance(task_type, str):
-        try:
-            task_type = A2ATaskType(task_type)
-        except ValueError:
-            return True   # unknown wire value → assume the worst
-    return task_type in PII_BEARING_TASK_TYPES
-
 # Source of truth for direction + correlation per message. Built from the PDF's
 # Part A / Part B summary tables and the §5 identifiers table.
 MESSAGES: dict[A2ATaskType, MessageSpec] = {
     # Part A
-    _T.CHANGE_COMMUNICATION:     _spec(_T.CHANGE_COMMUNICATION, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "once per (change_id, version)", carries_pii=True),
-    _T.PROPOSAL_ACKNOWLEDGED:    _spec(_T.PROPOSAL_ACKNOWLEDGED, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "once per (change_id, version_received)"),
-    _T.CHANGE_ACKNOWLEDGEMENT:   _spec(_T.CHANGE_ACKNOWLEDGEMENT, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "once per (change_id, version_accepted)"),
-    _T.QUERY:                    _spec(_T.QUERY, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "any; per question", carries_pii=True),
-    _T.CLARIFICATION_RESPONSE:   _spec(_T.CLARIFICATION_RESPONSE, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "one per query_id", carries_pii=True),
-    _T.COUNTER_PROPOSAL:         _spec(_T.COUNTER_PROPOSAL, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "any; per proposal", carries_pii=True),
-    _T.COUNTER_DECISION:         _spec(_T.COUNTER_DECISION, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "optional; per counter_proposal_id", carries_pii=True),
-    _T.MILESTONE_UPDATE:         _spec(_T.MILESTONE_UPDATE, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "per milestone transition"),
+    _T.CHANGE_COMMUNICATION:     _spec(_T.CHANGE_COMMUNICATION, _D.NPCI_TO_BANK, _C.CHANGE_ID, "once per (change_id, version)"),
+    _T.PROPOSAL_ACKNOWLEDGED:    _spec(_T.PROPOSAL_ACKNOWLEDGED, _D.BANK_TO_NPCI, _C.CHANGE_ID, "once per (change_id, version_received)"),
+    _T.CHANGE_ACKNOWLEDGEMENT:   _spec(_T.CHANGE_ACKNOWLEDGEMENT, _D.BANK_TO_NPCI, _C.CHANGE_ID, "once per (change_id, version_accepted)"),
+    _T.QUERY:                    _spec(_T.QUERY, _D.BANK_TO_NPCI, _C.CHANGE_ID, "any; per question"),
+    _T.CLARIFICATION_RESPONSE:   _spec(_T.CLARIFICATION_RESPONSE, _D.NPCI_TO_BANK, _C.CHANGE_ID, "one per query_id"),
+    _T.COUNTER_PROPOSAL:         _spec(_T.COUNTER_PROPOSAL, _D.BANK_TO_NPCI, _C.CHANGE_ID, "any; per proposal"),
+    _T.COUNTER_DECISION:         _spec(_T.COUNTER_DECISION, _D.NPCI_TO_BANK, _C.CHANGE_ID, "optional; per counter_proposal_id"),
+    _T.MILESTONE_UPDATE:         _spec(_T.MILESTONE_UPDATE, _D.BANK_TO_NPCI, _C.CHANGE_ID, "per milestone transition"),
     _T.MILESTONE_STATUS_REQUEST: _spec(_T.MILESTONE_STATUS_REQUEST, _D.EITHER, _C.CHANGE_ID, "any time"),
     _T.MILESTONE_STATUS_REPORT:  _spec(_T.MILESTONE_STATUS_REPORT, _D.EITHER, _C.CHANGE_ID, "reply to request"),
-    _T.CERT_READINESS_DECLARATION: _spec(_T.CERT_READINESS_DECLARATION, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "once per (change_id, version_implementing)"),
-    _T.BLOCKER:                  _spec(_T.BLOCKER, _D.PARTNER_TO_AUTHORITY, _C.CHANGE_ID, "per impediment", carries_pii=True),
-    _T.BLOCKER_STATUS_UPDATE:    _spec(_T.BLOCKER_STATUS_UPDATE, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "any per blocker_id", carries_pii=True),
-    _T.BLOCKER_RESOLUTION:       _spec(_T.BLOCKER_RESOLUTION, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "once per blocker_id (terminal)", carries_pii=True),
+    _T.CERT_READINESS_DECLARATION: _spec(_T.CERT_READINESS_DECLARATION, _D.BANK_TO_NPCI, _C.CHANGE_ID, "once per (change_id, version_implementing)"),
+    _T.BLOCKER:                  _spec(_T.BLOCKER, _D.BANK_TO_NPCI, _C.CHANGE_ID, "per impediment"),
+    _T.BLOCKER_STATUS_UPDATE:    _spec(_T.BLOCKER_STATUS_UPDATE, _D.NPCI_TO_BANK, _C.CHANGE_ID, "any per blocker_id"),
+    _T.BLOCKER_RESOLUTION:       _spec(_T.BLOCKER_RESOLUTION, _D.NPCI_TO_BANK, _C.CHANGE_ID, "once per blocker_id (terminal)"),
     # Part B
-    _T.CERT_CONFIG_REQUEST:      _spec(_T.CERT_CONFIG_REQUEST, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "once per cflow_id"),
-    _T.CERT_CONFIG_SUBMISSION:   _spec(_T.CERT_CONFIG_SUBMISSION, _D.PARTNER_TO_AUTHORITY, _C.CFLOW_ID, "once per cflow_id", carries_pii=True),
-    _T.CERT_SETUP_NOTIFICATION:  _spec(_T.CERT_SETUP_NOTIFICATION, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "once per cert_attempt"),
-    _T.CERT_TEST_PREPARATION:    _spec(_T.CERT_TEST_PREPARATION, _D.PARTNER_TO_AUTHORITY, _C.CFLOW_ID, "incremental", carries_pii=True),
-    _T.CERT_CASE_RESULT:         _spec(_T.CERT_CASE_RESULT, _D.EITHER, _C.CFLOW_ID, "per (case_id, attempt)", carries_pii=True),
-    _T.CERT_VERDICT_NOTIFICATION: _spec(_T.CERT_VERDICT_NOTIFICATION, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "per failed case", carries_pii=True),
-    _T.CERT_VERDICT_DISPUTE:     _spec(_T.CERT_VERDICT_DISPUTE, _D.PARTNER_TO_AUTHORITY, _C.CFLOW_ID, "per disputed verdict", carries_pii=True),
-    _T.CERT_WAIVER_REQUEST:      _spec(_T.CERT_WAIVER_REQUEST, _D.PARTNER_TO_AUTHORITY, _C.CFLOW_ID, "per case", carries_pii=True),
-    _T.CERT_WAIVER_DECISION:     _spec(_T.CERT_WAIVER_DECISION, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "per waiver request"),
-    _T.CERT_FIX_NOTIFICATION:    _spec(_T.CERT_FIX_NOTIFICATION, _D.PARTNER_TO_AUTHORITY, _C.CFLOW_ID, "per fix batch"),
-    _T.CERT_SIGNOFF_NOTIFICATION: _spec(_T.CERT_SIGNOFF_NOTIFICATION, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "once per cflow_id"),
+    _T.CERT_CONFIG_REQUEST:      _spec(_T.CERT_CONFIG_REQUEST, _D.NPCI_TO_BANK, _C.CFLOW_ID, "once per cflow_id"),
+    _T.CERT_CONFIG_SUBMISSION:   _spec(_T.CERT_CONFIG_SUBMISSION, _D.BANK_TO_NPCI, _C.CFLOW_ID, "once per cflow_id"),
+    _T.CERT_SETUP_NOTIFICATION:  _spec(_T.CERT_SETUP_NOTIFICATION, _D.NPCI_TO_BANK, _C.CFLOW_ID, "once per cert_attempt"),
+    _T.CERT_TEST_PREPARATION:    _spec(_T.CERT_TEST_PREPARATION, _D.BANK_TO_NPCI, _C.CFLOW_ID, "incremental"),
+    _T.CERT_CASE_RESULT:         _spec(_T.CERT_CASE_RESULT, _D.EITHER, _C.CFLOW_ID, "per (case_id, attempt)"),
+    _T.CERT_VERDICT_NOTIFICATION: _spec(_T.CERT_VERDICT_NOTIFICATION, _D.NPCI_TO_BANK, _C.CFLOW_ID, "per failed case"),
+    _T.CERT_VERDICT_DISPUTE:     _spec(_T.CERT_VERDICT_DISPUTE, _D.BANK_TO_NPCI, _C.CFLOW_ID, "per disputed verdict"),
+    _T.CERT_WAIVER_REQUEST:      _spec(_T.CERT_WAIVER_REQUEST, _D.BANK_TO_NPCI, _C.CFLOW_ID, "per case"),
+    _T.CERT_WAIVER_DECISION:     _spec(_T.CERT_WAIVER_DECISION, _D.NPCI_TO_BANK, _C.CFLOW_ID, "per waiver request"),
+    _T.CERT_FIX_NOTIFICATION:    _spec(_T.CERT_FIX_NOTIFICATION, _D.BANK_TO_NPCI, _C.CFLOW_ID, "per fix batch"),
+    _T.CERT_SIGNOFF_NOTIFICATION: _spec(_T.CERT_SIGNOFF_NOTIFICATION, _D.NPCI_TO_BANK, _C.CFLOW_ID, "once per cflow_id"),
     _T.CERT_STATUS_REQUEST:      _spec(_T.CERT_STATUS_REQUEST, _D.EITHER, _C.CFLOW_ID, "any time"),
     _T.CERT_STATUS_REPORT:       _spec(_T.CERT_STATUS_REPORT, _D.EITHER, _C.CFLOW_ID, "reply or push"),
     _T.CERT_RUN_ABORT:           _spec(_T.CERT_RUN_ABORT, _D.EITHER, _C.CFLOW_ID, "once; terminal"),
     # Part C
-    _T.ECHO:                     _spec(_T.ECHO, _D.PARTNER_TO_AUTHORITY, _C.NONE, "any time"),
+    _T.ECHO:                     _spec(_T.ECHO, _D.BANK_TO_NPCI, _C.NONE, "any time"),
     # ext
-    _T.CERT_WITNESS_REQUEST:     _spec(_T.CERT_WITNESS_REQUEST, _D.PARTNER_TO_AUTHORITY, _C.CFLOW_ID, "per witness session", ext=True),
-    _T.CERT_WITNESS_SCHEDULED:   _spec(_T.CERT_WITNESS_SCHEDULED, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "per witness session", ext=True),
-    _T.REVISION_IN_PROGRESS:     _spec(_T.REVISION_IN_PROGRESS, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "per revision round", ext=True),
-    _T.ROUND_OPENED:             _spec(_T.ROUND_OPENED, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "per (change_id, partner_id, round_number)", ext=True),
-    _T.ROUND_CLOSED:             _spec(_T.ROUND_CLOSED, _D.AUTHORITY_TO_PARTNER, _C.CHANGE_ID, "per (change_id, partner_id, round_number)", ext=True),
-    _T.HTTP_EXCHANGE_REQUEST:    _spec(_T.HTTP_EXCHANGE_REQUEST, _D.EITHER, _C.NONE, "one per tunnelled exchange", ext=True, carries_pii=True),
-    _T.HTTP_EXCHANGE_RESPONSE:   _spec(_T.HTTP_EXCHANGE_RESPONSE, _D.EITHER, _C.NONE, "at most one per exchange_id (deferred case)", ext=True, carries_pii=True),
-    _T.CERT_EXECUTION_START:     _spec(_T.CERT_EXECUTION_START, _D.AUTHORITY_TO_PARTNER, _C.CFLOW_ID, "once per (cflow_id, cert_attempt)", ext=True),
+    _T.CERT_WITNESS_REQUEST:     _spec(_T.CERT_WITNESS_REQUEST, _D.BANK_TO_NPCI, _C.CFLOW_ID, "per witness session", ext=True),
+    _T.CERT_WITNESS_SCHEDULED:   _spec(_T.CERT_WITNESS_SCHEDULED, _D.NPCI_TO_BANK, _C.CFLOW_ID, "per witness session", ext=True),
+    _T.REVISION_IN_PROGRESS:     _spec(_T.REVISION_IN_PROGRESS, _D.NPCI_TO_BANK, _C.CHANGE_ID, "per revision round", ext=True),
+    _T.ROUND_OPENED:             _spec(_T.ROUND_OPENED, _D.NPCI_TO_BANK, _C.CHANGE_ID, "per (change_id, partner_id, round_number)", ext=True),
+    _T.ROUND_CLOSED:             _spec(_T.ROUND_CLOSED, _D.NPCI_TO_BANK, _C.CHANGE_ID, "per (change_id, partner_id, round_number)", ext=True),
+    # EITHER here is the static summary; the binding rule per message is
+    # txn_direction(task_type, initiated_by) below.
+    _T.TXN_REQUEST:              _spec(_T.TXN_REQUEST, _D.EITHER, _C.CFLOW_ID, "per transaction", ext=True),
+    _T.TXN_RESPONSE:             _spec(_T.TXN_RESPONSE, _D.EITHER, _C.CFLOW_ID, "one per txn_request", ext=True),
+    _T.CERT_VAL_REQUEST:     _spec(_T.CERT_VAL_REQUEST, _D.BANK_TO_NPCI, _C.CFLOW_ID, "per batch", ext=True),
+    # 2026-10-12 — completion + signoff pull pair. Both bank-initiated; the
+    # NPCI-side report (direction NPCI_TO_BANK) is sent either as a sync reply
+    # artifact to the completion-check request OR fired asynchronously before
+    # signoff.
+    _T.CERT_COMPLETION_CHECK_REQUEST: _spec(_T.CERT_COMPLETION_CHECK_REQUEST, _D.BANK_TO_NPCI, _C.CFLOW_ID, "any time",          ext=True),
+    _T.CERT_COMPLETION_REPORT:        _spec(_T.CERT_COMPLETION_REPORT,        _D.NPCI_TO_BANK, _C.CFLOW_ID, "per report",        ext=True),
+    _T.CERT_SIGNOFF_REQUEST:          _spec(_T.CERT_SIGNOFF_REQUEST,          _D.BANK_TO_NPCI, _C.CFLOW_ID, "once per cflow_id", ext=True),
+    _T.CERT_VERDICT_DISPUTE_RESPONSE: _spec(_T.CERT_VERDICT_DISPUTE_RESPONSE, _D.NPCI_TO_BANK, _C.CFLOW_ID, "per dispute",       ext=True),
+    _T.CERT_VERDICT_ACCEPTANCE:       _spec(_T.CERT_VERDICT_ACCEPTANCE,       _D.BANK_TO_NPCI, _C.CFLOW_ID, "per verdict",       ext=True),
+    _T.CERT_TEST_RESPONSE:            _spec(_T.CERT_TEST_RESPONSE,            _D.NPCI_TO_BANK, _C.CFLOW_ID, "per batch + one final", ext=True),
 }
 
 # The 28 frozen messages + echo, in PDF order. Used by the drift test and by
@@ -515,6 +366,152 @@ class PayloadBase(BaseModel):
 PAYLOAD_SCHEMAS: dict[A2ATaskType, type[PayloadBase]] = {
     tt: PayloadBase for tt in MESSAGES
 }
+
+
+# ── Txn over A2A (docs/upi_over_a2a_plan.md, Message contract) ─────────────────
+#
+# txn_request / txn_response carry certification transactions between the
+# switch engines. The wrappers move opaque bytes: base64 of exactly what the
+# sender's engine signed (the UPI XML is XML-DSig signed, so any re-encoding
+# breaks the signature). Nothing here parses the XML. Never on the wire:
+# expected response codes, expected ACK errors, verdict hints.
+
+
+class TxnInitiator(str, enum.Enum):
+    """Who fired the transaction — NOT who sends a given message (the
+    response to a BANK-initiated request travels NPCI→bank)."""
+
+    NPCI = "NPCI"
+    BANK = "BANK"
+
+
+# (task_type, initiated_by) → the only legal wire direction. Ingress derives
+# the legal sender from this and compares it with the authenticated caller; a
+# mismatch is refused as WRONG_DIRECTION.
+TXN_DIRECTIONS: dict[tuple[A2ATaskType, TxnInitiator], Direction] = {
+    (A2ATaskType.TXN_REQUEST,  TxnInitiator.NPCI): Direction.NPCI_TO_BANK,
+    (A2ATaskType.TXN_REQUEST,  TxnInitiator.BANK): Direction.BANK_TO_NPCI,
+    (A2ATaskType.TXN_RESPONSE, TxnInitiator.NPCI): Direction.BANK_TO_NPCI,
+    (A2ATaskType.TXN_RESPONSE, TxnInitiator.BANK): Direction.NPCI_TO_BANK,
+}
+
+
+def txn_direction(task_type: A2ATaskType, initiated_by: TxnInitiator) -> Direction:
+    return TXN_DIRECTIONS[(task_type, initiated_by)]
+
+
+class TxnFaultCode(str, enum.Enum):
+    """Wrapper-level delivery faults — infrastructure, never a certification
+    FAIL. Toward the engine a timeout fault is delivered as no answer, so the
+    engine applies its own timeout (UPI: U09); wrappers never fabricate a
+    NACK."""
+
+    SWITCH_UNREACHABLE = "SWITCH_UNREACHABLE"
+    SWITCH_TIMEOUT     = "SWITCH_TIMEOUT"
+    NO_ACTIVE_RUN      = "NO_ACTIVE_RUN"
+    UNKNOWN_PARTNER    = "UNKNOWN_PARTNER"
+    UNKNOWN_TARGET     = "UNKNOWN_TARGET"
+    WRONG_DIRECTION    = "WRONG_DIRECTION"
+
+
+class TxnHeader(PayloadBase):
+    """Only the content type; everything else rides in metadata."""
+
+    content_type: str
+
+
+class TxnMetadata(PayloadBase):
+    product: str
+    content_encoding: str = "base64"
+    txn_ref: str
+    size_bytes: int
+    # uri is never dialled as given: the receiver matches it against the
+    # product allow-list and joins it to its own configured base, else
+    # UNKNOWN_TARGET. Absent on an ACK.
+    uri: str | None = None
+    sent_at: str | None = None
+    timeout_ms: int | None = None
+    # txn_response — the switch timings the partner reports (its internal
+    # legs are otherwise invisible to NPCI)
+    received_at: str | None = None
+    responded_at: str | None = None
+    latency_ms: int | None = None
+    # ACK only
+    http_status: int | None = None
+    acked_at: str | None = None
+
+
+class TxnBody(PayloadBase):
+    header: TxnHeader
+    metadata: TxnMetadata
+    txn_payload: str   # base64 of the raw bytes, verbatim
+
+
+class TxnIterationRef(PayloadBase):
+    attempt: int
+    attempt_type: str | None = None
+
+
+class TxnCertificationRef(PayloadBase):
+    """The (product, org_id) identity + run context every transaction
+    envelope names. Inbound, org_id must belong to the JWT's partner, else
+    partner_mismatch."""
+
+    product: str
+    org_id: str
+    run_id: str | None = None
+    partner_id: str | None = None
+    cert_name: str | None = None
+    subset: str | None = None
+    phase: str | None = None
+    iteration: TxnIterationRef | None = None
+
+
+class TxnTestCaseRef(PayloadBase):
+    tc_id: str | None = None
+
+
+class TxnMessagePayload(PayloadBase):
+    """payload of txn_request / txn_response."""
+
+    initiated_by: TxnInitiator
+    certification: TxnCertificationRef
+    txn: TxnBody
+    test_case: TxnTestCaseRef | None = None
+
+
+class TxnFaultBody(PayloadBase):
+    fault_code: TxnFaultCode
+    fault_detail: str | None = None
+
+
+class TxnReply(PayloadBase):
+    """The A2A reply artifact: the relayed ACK bytes, or a fault — exactly
+    one of `txn` / `fault`. Wrappers never author an ACK; dedup on
+    message_id replays the stored one."""
+
+    acks_message_id: str
+    kind: str = "txn_ack"
+    correlation_id: str | None = None
+    txn: TxnBody | None = None
+    fault: TxnFaultBody | None = None
+
+
+PAYLOAD_SCHEMAS[A2ATaskType.TXN_REQUEST] = TxnMessagePayload
+PAYLOAD_SCHEMAS[A2ATaskType.TXN_RESPONSE] = TxnMessagePayload
+
+
+class CertValRequestPayload(PayloadBase):
+    """cert_val_request (bank -> NPCI). `batch_id` is the cflow_id of the
+    run whose outcomes are wanted; `case_ids` narrows it (empty = whole batch)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str
+    case_ids: list[str] | None = None
+
+
+PAYLOAD_SCHEMAS[A2ATaskType.CERT_VAL_REQUEST] = CertValRequestPayload
 
 
 class Envelope(BaseModel):
@@ -622,76 +619,20 @@ class InboundEnvelope:
     protocol_version: str | None
 
 
-def _as_str(value: object) -> str | None:
-    """Accept a string, reject any other non-null type.
-
-    Returns None (treated as "absent") rather than coercing: `str(["a","b"])`
-    would silently produce the literal `"['a', 'b']"` and carry a
-    type-confused value deeper into the system, which is exactly the failure
-    this guard exists to stop.
-    """
-    return value if isinstance(value, str) else None
-
-
-def _as_int(value: object) -> int | None:
-    """Accept an int, or a string of digits (JSON senders vary). Reject the
-    rest. `bool` is excluded explicitly — in Python `isinstance(True, int)` is
-    True, and a `cert_attempt` of `True` silently becoming attempt 1 is the
-    kind of quiet nonsense this whole function is here to prevent."""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value.strip())
-        except ValueError:
-            return None
-    return None
-
-
 def read_envelope(data: dict | None) -> InboundEnvelope:
-    """Extract envelope fields from an inbound message dict.
-
-    TYPE-checked, but still field-tolerant — a deliberate middle position
-    between the two things the security contract could have meant by
-    `validation_failure_behavior: "reject"`:
-
-      * **Missing fields stay tolerated.** Rejecting an envelope that omits
-        `message_id`/`correlation_id`/`protocol_version` would break a legacy
-        or older-version authority that never sends them. That compatibility
-        promise is why this reader exists, and it is unchanged.
-
-      * **Wrong-typed fields are no longer passed through.** Previously
-        `payload` was `data.get("payload") or {}`, so a JSON body sending
-        `"payload": "some string"` handed a `str` to every downstream handler
-        that is annotated `dict` and calls `.get()` on it — an AttributeError
-        deep inside a handler at best, and at worst a value used in a context
-        that accepts both. `change_id` typed as a dict flowed into DB lookups.
-        A field of the wrong type is now read as absent, so the existing
-        `if not task_type` / `if not payload` guards catch it at the boundary
-        where the error is legible.
-
-    This closes the actual exploitable half of the gap (type confusion from an
-    H3 boundary) at zero compatibility cost. Full strict rejection of unknown
-    or missing fields remains a protocol-version decision to make jointly with
-    the Authority, not something to impose unilaterally from the partner side.
-    """
-    data = data if isinstance(data, dict) else {}
-    payload = data.get("payload")
+    """Extract envelope fields from an inbound message dict, tolerantly."""
+    data = data or {}
     return InboundEnvelope(
-        task_type=_as_str(data.get("task_type")) or "",
-        # Handlers are annotated `payload: dict` and index into it; anything
-        # else is read as empty so the caller's `if not payload` guard fires.
-        payload=payload if isinstance(payload, dict) else {},
-        from_=_as_str(data.get("from")),
-        message_id=_as_str(data.get("message_id")),
-        correlation_id=_as_str(data.get("correlation_id")),
-        change_id=_as_str(data.get("change_id")),
-        cflow_id=_as_str(data.get("cflow_id")),
-        cert_attempt=_as_int(data.get("cert_attempt")),
-        agent_id=_as_str(data.get("agent_id")),
-        agent_run_id=_as_str(data.get("agent_run_id")),
-        timestamp=_as_str(data.get("timestamp")),
-        protocol_version=_as_str(data.get("protocol_version")),
+        task_type=data.get("task_type") or "",
+        payload=data.get("payload") or {},
+        from_=data.get("from"),
+        message_id=data.get("message_id"),
+        correlation_id=data.get("correlation_id"),
+        change_id=data.get("change_id"),
+        cflow_id=data.get("cflow_id"),
+        cert_attempt=data.get("cert_attempt"),
+        agent_id=data.get("agent_id"),
+        agent_run_id=data.get("agent_run_id"),
+        timestamp=data.get("timestamp"),
+        protocol_version=data.get("protocol_version"),
     )

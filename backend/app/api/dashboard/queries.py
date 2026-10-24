@@ -1,7 +1,4 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""Dashboard domain: queries — general + cert-channel clarifications to the authority."""
+"""Dashboard domain: queries — general + cert-channel clarifications to NPCI."""
 import logging
 from uuid import uuid4
 
@@ -12,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import get_current_user
 from app.database import get_db
 from app.models import IncomingChange, OutgoingQuery, PartnerUser
-from app.authority_client import send_query
+from app.npci_client import send_query
 
 from .changes import get_change
 
@@ -41,17 +38,17 @@ def submit_query(change_id: str, body: QueryRequest, user: PartnerUser = Depends
     if getattr(change, "revision_in_progress", False) and not _is_frozen(change):
         raise HTTPException(
             status_code=409,
-            detail="The authority is preparing a revised kit — queries are on hold until the new version ships.",
+            detail="NPCI is preparing a revised kit — queries are on hold until the new version ships.",
         )
 
     # Mint correlation_id first so we can pass the same UUID to both the
-    # OutgoingQuery row and the A2A wire — the authority echoes it back on the
+    # OutgoingQuery row and the A2A wire — NPCI echoes it back on the
     # CLARIFICATION_RESPONSE so the answer attaches to THIS row, not
     # whichever pending query is most recent in the channel.
     correlation_id = str(uuid4())
 
-    # Send to the authority via A2A — task_type=query, kind=general
-    result = send_query(db, change.authority_change_id, body.message, correlation_id=correlation_id)
+    # Send to NPCI via A2A — task_type=query, kind=general
+    result = send_query(db, change.npci_change_id, body.message, correlation_id=correlation_id)
 
     query = OutgoingQuery(
         change_id=change_id,
@@ -81,13 +78,13 @@ def submit_cert_query(
     user: PartnerUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Send a cert-channel clarification to the authority.
+    """Send a cert-channel clarification to NPCI.
 
     Same wire shape as `/query` but uses A2A task_type=cert_query so
-    the authority's executor routes it to a kind='cert' negotiation thread.
+    NPCI's executor routes it to a kind='cert' negotiation thread.
     Strictly separate from the general Phase C inbox — no row is shared.
     """
-    from app.authority_client import send_cert_query
+    from app.npci_client import send_cert_query
 
     change = db.get(IncomingChange, change_id)
     if not change:
@@ -95,12 +92,12 @@ def submit_cert_query(
     if getattr(change, "revision_in_progress", False) and not _is_frozen(change):
         raise HTTPException(
             status_code=409,
-            detail="The authority is preparing a revised kit — queries are on hold until the new version ships.",
+            detail="NPCI is preparing a revised kit — queries are on hold until the new version ships.",
         )
 
     correlation_id = str(uuid4())
     result = send_cert_query(
-        db, change.authority_change_id, body.message, correlation_id=correlation_id,
+        db, change.npci_change_id, body.message, correlation_id=correlation_id,
     )
 
     query = OutgoingQuery(

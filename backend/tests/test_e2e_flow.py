@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """End-to-end: inbound change_communication → handler → feasibility agent →
 report persisted + agent_runs audit row (WS8)."""
 from app.a2a_common.handlers import TaskReceiveRequest, handle_change_communication

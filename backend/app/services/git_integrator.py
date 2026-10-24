@@ -1,14 +1,11 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""Git Integrator (partner side) — Code RAG.
+"""Git Integrator (partner side) — Code RAG Phase 3.4.
 
 Pushes generated file contents to the partner's OWN GitLab repo as a merge
 request for human review: create branch → commit files → open MR. It NEVER
 merges — the partner's engineers review and merge themselves.
 
-Standalone + deliberately simpler than the authority's `backend/app/services/
-git_integrator.py` (no multi-repo grouping, no build-phase state machine, no
+Standalone + deliberately simpler than the NPCI `backend/app/services/
+git_integrator.py` (no multi-repo grouping, no Phase-B state machine, no
 auto-merge). Reuses the repo handle + write-only token plumbing from
 `rag/code_ingestion.py` so token storage stays in one place.
 """
@@ -126,11 +123,7 @@ def open_merge_request(
     return {
         "branch": branch_name,
         "commit_sha": commit_sha,
-        # Kept for logs/operator use; not serialised to the browser (see _mr_view).
         "mr_url": mr_url,
-        # The components the UI needs to rebuild the link itself, so no URL
-        # string has to cross the API boundary into an href.
         "mr_iid": mr.iid,
-        "project_path": project.path_with_namespace,
         "files_count": len(files),
     }

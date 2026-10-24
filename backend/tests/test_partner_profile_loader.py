@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Tests for the DB-first / file-fallback partner profile loader.
 
 The profile is now UI-configurable: `agents/_common.read_partner_profile()`

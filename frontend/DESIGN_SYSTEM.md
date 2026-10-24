@@ -1,8 +1,8 @@
 # Partner Platform — Design System
 
-The visual + interaction system for the partner (partner-side) frontend.
+The visual + interaction system for the partner (bank-side) frontend.
 Aesthetic: a **Linear/Stripe-dashboard hybrid** — neutral surfaces, one
-disciplined accent, dense but breathable. It's an operational console a partner
+disciplined accent, dense but breathable. It's an operational console a bank
 reviewer lives in all day, not a marketing site. **Light mode only.**
 
 The tokens below live in [`src/index.css`](src/index.css) `:root`. Components

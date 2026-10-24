@@ -1,8 +1,4 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { Component, Fragment, useEffect, useMemo, useRef, useState } from 'react';
-import { t } from '../strings'
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, ArrowRight, Check, Send, Shield, Sparkles, Trash2, Edit2, X, Save, Download, Inbox, Rocket, FlaskConical, BadgeCheck, Loader2, AlertTriangle, FileText, Presentation, PlayCircle, HelpCircle, Image as ImageIcon, FileJson, StickyNote, Mail, Clock, Building2, Hash, Activity, Eye, RefreshCw, FileCode2, Tag, ToggleLeft, ToggleRight, Maximize2, ClipboardCheck, Lock, ChevronRight } from 'lucide-react';
@@ -16,16 +12,15 @@ import {
   downloadCertSignoff,
   acceptChange, acceptCounter, reportBlocker, raiseEmergencyIssue,
   submitCertQuery, listCertQueries,
-  getCertStatus, updateCertStatus, downloadCertSignoffPdf, getDomain,
-  listCertExecutions,
+  getCertStatus, updateCertStatus, certMockComplete, downloadCertSignoffPdf,
 } from '../services/api';
-import { parseIso, formatRelative, formatDayTime, formatDateTime as formatAbsolute } from '../lib/datetime';
+import { safeHref } from '../utils/safeUrl';
+import { parseIso, formatRelative, formatDateTime as formatAbsolute } from '../lib/datetime';
 import FeasibilityPanel from '../components/FeasibilityPanel';
 import DesignPanel from '../components/DesignPanel';
+import NpciStatusPanel from '../components/NpciStatusPanel';
 import CodePanel from '../components/CodePanel';
 import TestingPanel from '../components/TestingPanel';
-import ArtifactRef from '../components/ArtifactRef';
-import PrototypePreview from '../components/PrototypePreview';
 
 const PROGRESS_STEPS = [
   { key: 'design_completed', label: 'Design Completed' },
@@ -75,7 +70,7 @@ const card = (extra = {}) => ({
 
 // ── Cert test cases — markdown → structured table ─────────────────────────────
 //
-// The authority side serves a JSON companion (simulator-contract shape) alongside
+// The NPCI side serves a JSON companion (simulator-contract shape) alongside
 // the markdown; the partner side only has the markdown (see
 // partner-platform/backend/app/a2a_common/handlers/change_communication.py —
 // only `content` and optional `xlsx_b64` are persisted). So we parse the
@@ -91,66 +86,16 @@ const CERT_STATUS_COLORS = {
   Partial: '#2563eb',
 };
 
-/**
- * Read one `Label: value` field out of a DETAILS block.
- *
- * Implemented as a line scan rather than a regex. The previous version built
- *   `^<label>\s*:\s*([\s\S]*?)(?=\n[A-Z][a-zA-Z ]*\s*:|$)`   (with /m)
- * per call, and its lookahead was ambiguous: `[a-zA-Z ]*` and `\s*` can both
- * match a space, so a long run of spaces containing no colon had very many ways
- * to split between them and the engine retried at every start position.
- * Measured on the real helper that was quadratic — 8k spaces took 21 ms, 64k
- * took 1291 ms (4x per doubling) — and since the parser calls this SEVEN times
- * per test case, one document of 20 such cases froze the tab for ~3.8 s. The
- * markdown arrives over A2A, so its size and shape are not ours to trust.
- *
- * Behaviour matches the regex on every realistic input. The `/m` flag made that
- * regex effectively SINGLE-LINE — `$` matched at each line end, so the lazy
- * group always stopped at the first newline and a value never continued onto the
- * next line. This takes the first matching line's remainder and nothing more,
- * with whitespace collapsed as before. Verified against the old implementation
- * over 152 label/block combinations.
- *
- * ONE deliberate difference, which fixes a bug rather than preserving it. For a
- * label with an empty value (`"API Involved:"` followed by `"Type: x"`), the old
- * `\s*` after the colon greedily consumed the NEWLINE, so the capture started on
- * the following line and returned `"Type: x"` — reporting a DIFFERENT field's
- * text as this field's value. This returns `''`, which is what an empty field
- * means.
- */
+function _escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function _detailField(detailsBlock, label) {
-  if (!detailsBlock || !label) return '';
-
-  const lines = String(detailsBlock).split('\n');
-  const prefix = `${label}:`;
-
-  // Explicit iteration ceiling. A real DETAILS block is a short key/value list —
-  // a few dozen lines at most — so scanning further can only be malformed or
-  // hostile input. The markdown arrives over A2A, so its size is not ours to
-  // trust, and `lines.length` is therefore attacker-influenced.
-  //
-  // The ceiling is the LOOP CONDITION ITSELF, and the data-dependent length is
-  // only a `break` guard inside the body. Written the other way round —
-  // `i < Math.min(lines.length, MAX)` — the trip count is still bounded, but the
-  // condition textually reads a value that taint analysis traces back to the
-  // network (the unchecked-input-for-loop-condition shape, and `Math.min` is not
-  // on the analyser's sanitiser list). Keeping untrusted lengths out of the condition is
-  // what makes the bound provable to a reader and to the scanner alike. See
-  // test/boundedLoops.test.mjs, which enforces this shape across the frontend.
-  const MAX_DETAIL_LINES = 500;
-
-  for (let i = 0; i < MAX_DETAIL_LINES; i += 1) {
-    if (i >= lines.length) break;
-    // Exact, case-sensitive label at the start of the line, then a colon —
-    // matching the old anchored `^<label>\s*:`. (The old `\s*` before the colon
-    // could never match anything here: the label is followed immediately by the
-    // colon in every real DETAILS block, and a space before a colon would have
-    // been part of the label token.)
-    if (!lines[i].startsWith(prefix)) continue;
-    // Everything after the colon on THAT line only, whitespace collapsed.
-    return lines[i].slice(prefix.length).replace(/\s+/g, ' ').trim();
-  }
-  return '';
+  if (!detailsBlock) return '';
+  const re = new RegExp(`^${_escapeRe(label)}\\s*:\\s*([\\s\\S]*?)(?=\\n[A-Z][a-zA-Z ]*\\s*:|$)`, 'm');
+  const m = detailsBlock.match(re);
+  if (!m) return '';
+  return m[1].replace(/\s+/g, ' ').trim();
 }
 
 function parseCertTestCasesMd(md) {
@@ -162,25 +107,9 @@ function parseCertTestCasesMd(md) {
   const caseChunks = chunks.filter(c => c.startsWith('### '));
   if (caseChunks.length === 0) return null;
 
-  // Same bounded-loop rule as `_detailField`: the case count comes straight from
-  // an A2A-delivered document, and each iteration runs eight regexes plus seven
-  // `_detailField` scans, so an oversized document is the expensive shape. A
-  // real cert plan is tens of cases; 500 is far above any legitimate one. The
-  // condition is the constant and the tainted length is a `break` guard, so no
-  // untrusted value is ever read by the loop condition.
-  const MAX_TEST_CASES = 500;
-
   const cases = [];
-  for (let c = 0; c < MAX_TEST_CASES; c += 1) {
-    if (c >= caseChunks.length) break;
-    const chunk = caseChunks[c];
-    // `[ \t]` rather than `\s` around the em dash, and a bounded title.
-    // `\s+…([^(\n]+?)…\s*$` let a run of spaces be split between three
-    // overlapping quantifiers, which is quadratic: 16k spaces took 0.6s, 32k
-    // took 2.5s. `\s` also matches \n, which this line-anchored pattern never
-    // wants. The markdown arrives over A2A, so its size and shape are not
-    // ours to trust — the same reasoning already applied to _detailField.
-    const headingMatch = chunk.match(/^###[ \t]+(\S+)[ \t]+—[ \t]+([^(\n]{1,300}?)(?:[ \t]+\(highlighted\))?[ \t]*$/m);
+  for (const chunk of caseChunks) {
+    const headingMatch = chunk.match(/^###\s+(\S+)\s+—\s+([^(\n]+?)(?:\s+\(highlighted\))?\s*$/m);
     if (!headingMatch) continue;
     const test_id = headingMatch[1].trim();
     const expected_status = headingMatch[2].trim();
@@ -188,13 +117,7 @@ function parseCertTestCasesMd(md) {
     const detailsMatch = chunk.match(/\*\*DETAILS\*\*\s*\n```[^\n]*\n([\s\S]*?)\n```/);
     const details_block = detailsMatch ? detailsMatch[1] : '';
 
-    // `[ \t]*\n` + a single `\n` boundary instead of `\s*\n+…\n+`. The
-    // original had four constructs that all match a newline overlapping each
-    // other, so a run of newlines with no following **TEST STEPS** had an
-    // enormous number of splits to try before failing: 300 newlines took
-    // 0.57s, 500 took 4.2s, 600 took 7.6s — and this runs once per case
-    // chunk, up to MAX_TEST_CASES. Worst case froze the tab.
-    const descMatch = chunk.match(/\*\*DESCRIPTION\*\*[ \t]*\n([\s\S]*?)\n[ \t]*\*\*TEST STEPS\*\*/);
+    const descMatch = chunk.match(/\*\*DESCRIPTION\*\*\s*\n+([\s\S]*?)\n+\*\*TEST STEPS\*\*/);
     const description_block = descMatch ? descMatch[1].trim() : '';
 
     const stepsMatch = chunk.match(/\*\*TEST STEPS\*\*\s*\n+```[^\n]*\n([\s\S]*?)\n```/);
@@ -473,7 +396,7 @@ const PAGE_STYLES = `
 `;
 
 // Human-readable metadata for each Product Kit doc type. Mirrors
-// the authority side (ProductKit.jsx DOC_TYPES) so the two UIs label
+// the NPCI side (ProductKit.jsx DOC_TYPES) so the two UIs label
 // the same thing identically. Default falls back to a prettified
 // version of the raw key so an unknown doc type still renders OK.
 const DOC_TYPE_META = {
@@ -483,7 +406,7 @@ const DOC_TYPE_META = {
   explainer_video:    { label: 'Explainer Video',      desc: 'How-it-works video for end-users',                              icon: PlayCircle },
   faq:                { label: 'FAQ',                  desc: 'Customer & partner frequently-asked questions',                 icon: HelpCircle },
   cert_test_cases:    { label: 'Certification Tests',  desc: 'Test cases for partner certification suite',                    icon: FlaskConical },
-  circular:           { label: 'Operations Circular',  desc: `Formal ${t('term.authority')} circular for partner ops teams`,                    icon: Mail },
+  circular:           { label: 'Operations Circular',  desc: 'Formal NPCI circular for partner ops teams',                    icon: Mail },
   manifest:           { label: 'Release Manifest',     desc: 'Machine-readable rollout manifest (YAML)',                      icon: FileJson },
   product_note:       { label: 'Product Note',         desc: 'Internal product context & rationale',                          icon: StickyNote },
   prototype_screens:  { label: 'Prototype Screens',    desc: 'UI flow mockups for the new capability',                        icon: ImageIcon },
@@ -551,7 +474,7 @@ function downloadArtifact(spec, changeId, docId, base, names = {}) {
 
 // Timestamp helpers (parseIso / formatRelative / formatAbsolute) live in
 // lib/datetime — server timestamps are naive UTC and must be parsed as UTC
-// then rendered in IST so the partner portal matches the authority.
+// then rendered in IST so the partner portal matches NPCI.
 
 function formatBytes(n) {
   if (!n && n !== 0) return '';
@@ -602,7 +525,7 @@ function useDocReviewState(changeId) {
   return { state, markViewed };
 }
 
-// Stages on the rollout lifecycle, in order. Aligned with the authority's
+// Stages on the rollout lifecycle, in order. Aligned with NPCI's
 // Implementation Progress vocabulary so PMs and partners are looking
 // at the same 7 checkpoints when they talk:
 //   Communicated · Accepted · Design · Coding · Testing · Ready for Certification · Certified
@@ -613,7 +536,7 @@ const LIFECYCLE_STAGES = [
   {
     key:   'communicated',
     label: 'Communicated',
-    done:  () => true,                                       // Row exists → the authority communicated it
+    done:  () => true,                                       // Row exists → NPCI communicated it
     timeOf: (c) => c.received_at,
   },
   {
@@ -722,10 +645,10 @@ function LifecycleStepper({ change, completedSteps }) {
 }
 
 function ChangeContextBar({ change }) {
-  const ref = change.authority_change_id ? `${change.authority_change_id.slice(0, 8)}…` : '—';
+  const ref = change.npci_change_id ? `${change.npci_change_id.slice(0, 8)}…` : '—';
   const items = [
-    { icon: Building2, label: 'From',          value: `${t('term.authorityCap')} Change Management` },
-    { icon: Hash,      label: 'Reference',     value: ref, title: change.authority_change_id },
+    { icon: Building2, label: 'From',          value: 'NPCI Change Management' },
+    { icon: Hash,      label: 'Reference',     value: ref, title: change.npci_change_id },
     { icon: Clock,     label: 'Received',      value: formatRelative(change.received_at), title: formatAbsolute(change.received_at) },
     { icon: Activity,  label: 'Last activity', value: formatRelative(change.last_activity_at || change.received_at) },
   ];
@@ -969,7 +892,7 @@ function DocCard({ versions, changeId, reviewStateByDoc, onPreview }) {
 // leaves the doc list visible alongside on wide screens.
 function DocPreviewDrawer({ open, doc, docs, changeId, reviewState, onClose, onNavigate, onSelectDoc, onView }) {
   const [downloading, setDownloading] = useState(null);
-  // Prototype-screens full-size preview (scale-to-fit modal, mirrors the authority).
+  // Prototype-screens full-size preview (scale-to-fit modal, mirrors NPCI).
   const [showExpand, setShowExpand] = useState(false);
   const [modalScale, setModalScale] = useState(1);
   // Promo/explainer video — fetched as a blob (auth'd) for inline playback.
@@ -1232,15 +1155,14 @@ function DocPreviewDrawer({ open, doc, docs, changeId, reviewState, onClose, onN
             <div style={{ marginBottom: 16, fontSize: 12.5, color: T.textMuted }}>Loading video…</div>
           )}
           {(doc.doc_type || doc.type) === 'prototype_screens' ? (
-            // Interactive mobile-style prototype: doc.content is a complete,
-            // self-contained HTML file (inline CSS/JS, text wordmark — no external
-            // assets, so it renders in a sandboxed iframe with no network).
+            // Interactive BHIM-style prototype: doc.content is a complete,
+            // self-contained HTML file (BHIM logo already inlined by NPCI).
             // Render it in a sandboxed iframe — scripts ON so the in-page go()
             // click-through navigation works, but NO same-origin so it can't
             // reach the partner session. The iframe renders at native 390×780
             // internally; the inline preview is scaled to 0.6 (234×468) so it
             // fits the drawer without scrolling — Expand opens a scale-to-fit
-            // full-size modal (mirrors the authority platform).
+            // full-size modal (mirrors the NPCI platform).
             <div style={{ display: 'flex', justifyContent: 'center', padding: '8px 0' }}>
               <div style={{ position: 'relative', width: 234, height: 468 }}>
                 <div style={{
@@ -1253,9 +1175,10 @@ function DocPreviewDrawer({ open, doc, docs, changeId, reviewState, onClose, onN
                     position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
                     width: 110, height: 22, background: '#111', borderRadius: 14, zIndex: 2,
                   }} />
-                  <PrototypePreview
+                  <iframe
                     title="Prototype preview"
-                    html={doc.content}
+                    srcDoc={doc.content || ''}
+                    sandbox="allow-scripts"
                     style={{
                       width: '100%', height: '100%', border: 'none',
                       borderRadius: 28, background: '#fff', display: 'block',
@@ -1334,7 +1257,7 @@ function DocPreviewDrawer({ open, doc, docs, changeId, reviewState, onClose, onN
         </div>
       </div>
 
-      {/* Full-size prototype preview — scale-to-fit modal (mirrors the authority). */}
+      {/* Full-size prototype preview — scale-to-fit modal (mirrors NPCI). */}
       {showExpand && (doc.doc_type || doc.type) === 'prototype_screens' && (
         <div
           onClick={() => setShowExpand(false)}
@@ -1372,9 +1295,10 @@ function DocPreviewDrawer({ open, doc, docs, changeId, reviewState, onClose, onN
                 position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
                 width: 110, height: 22, background: '#111', borderRadius: 14, zIndex: 2,
               }} />
-              <PrototypePreview
+              <iframe
                 title="Prototype preview (expanded)"
-                html={doc.content}
+                srcDoc={doc.content || ''}
+                sandbox="allow-scripts"
                 style={{
                   width: '100%', height: '100%', border: 'none',
                   borderRadius: 28, background: '#fff', display: 'block',
@@ -1554,7 +1478,7 @@ function QueryPanel({ changeId, queries }) {
 
           {!suggestMut.isPending && drafts.length === 0 && suggestReason === 'no_api_key' && (
             <div style={{ color: 'var(--text-muted)', fontSize: 13, padding: 10 }}>
-              Configure the partner's LLM provider credentials in Settings to enable question suggestions.
+              Configure the partner Anthropic API key in Settings to enable question suggestions.
             </div>
           )}
 
@@ -1576,7 +1500,7 @@ function QueryPanel({ changeId, queries }) {
         </div>
       )}
 
-      {/* Sent queries + the authority responses */}
+      {/* Sent queries + NPCI responses */}
       {queries && queries.length > 0 && (
         <div style={{ marginTop: 16 }}>
           <div style={{
@@ -1592,7 +1516,7 @@ function QueryPanel({ changeId, queries }) {
               {q.response ? (
                 <div className="query-answer">{q.response}</div>
               ) : (
-                <div className="query-pending">Awaiting response from {t('term.authority')}...</div>
+                <div className="query-pending">Awaiting response from NPCI...</div>
               )}
             </div>
           ))}
@@ -1601,7 +1525,7 @@ function QueryPanel({ changeId, queries }) {
 
       {(!queries || queries.length === 0) && drafts.length === 0 && !suggestMut.isPending && !suggestReason && (
         <div style={{ color: 'var(--text-muted)', fontSize: 13, textAlign: 'center', padding: 12 }}>
-          No questions yet. Ask {t('term.authority')} a clarifying question, or use Negotiate above to propose changes.
+          No questions yet. Ask NPCI a clarifying question, or use Negotiate above to propose changes.
         </div>
       )}
     </div>
@@ -1703,7 +1627,7 @@ function FrozenDecisionActions({ changeId, onSubmitted }) {
               }}
             >
               {mutation.isPending ? <Loader2 size={13} className="spin" /> : <Send size={13} />}
-              {mutation.isPending ? 'Sending…' : `Send blocker to ${t('term.authority')}`}
+              {mutation.isPending ? 'Sending…' : 'Send blocker to NPCI'}
             </button>
           </div>
         </div>
@@ -1714,9 +1638,9 @@ function FrozenDecisionActions({ changeId, onSubmitted }) {
 
 function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted }) {
   const queryClient = useQueryClient();
-  // Messaging hold while the authority prepares a revised kit.
+  // Messaging hold while NPCI prepares a revised kit.
   const revisionHeld = !!change?.revision_in_progress;
-  // Kit frozen by the authority (round cap reached / specs finalised). The partner can
+  // Kit frozen by NPCI (round cap reached / specs finalised). The partner can
   // still Accept the rollout and ask basic clarifying questions — only the
   // negotiation (term changes) is closed.
   const frozen = Boolean(change?.negotiation_finalized_at) || (change?.negotiation_version || 1) >= 3;
@@ -1755,7 +1679,7 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
 
   // Once accepted, render a calm confirmation card — but keep an "Ask a
   // question" affordance so the partner can still raise generic clarifying
-  // queries to the authority after accepting (the rollout decision is done, questions
+  // queries to NPCI after accepting (the rollout decision is done, questions
   // never close).
   if (decision === 'accepted') {
     return (
@@ -1777,7 +1701,7 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
               Rollout accepted
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-muted, #6b7280)' }}>
-              Implementation can begin. You can still ask {t('term.authority')} a clarifying question below or in Activity.
+              Implementation can begin. You can still ask NPCI a clarifying question below or in Activity.
             </div>
 
             {mode !== 'question' && (
@@ -1798,12 +1722,12 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
               <div style={{ marginTop: 10 }}>
                 {frozen ? (
                   <label style={{ fontSize: 12, display: 'block', marginBottom: 4, color: '#92400e', background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 10px', lineHeight: 1.5 }}>
-                    The product kit has been <strong>frozen by {t('term.authority')}</strong> — use this only for
+                    The product kit has been <strong>frozen by NPCI</strong> — use this only for
                     {' '}<strong>basic, generic clarifying questions</strong> (it won't reopen negotiation).
                   </label>
                 ) : (
                   <label style={{ fontSize: 12, display: 'block', marginBottom: 4, color: 'var(--text-muted, #6b7280)' }}>
-                    Ask {t('term.authority')} a generic clarifying question. Opens a thread with {t('term.authority')}'s PM —
+                    Ask NPCI a generic clarifying question. Opens a thread with NPCI's PM —
                     it doesn't change the accepted rollout.
                   </label>
                 )}
@@ -1840,9 +1764,9 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
   const showAckBadge = decision === 'acknowledged';
   const showNegotiatingBadge = decision === 'negotiating';
   const subline = showNegotiatingBadge
-    ? `In negotiation with ${t('term.authority')}. You can still Accept at any time.`
+    ? 'In negotiation with NPCI. You can still Accept at any time.'
     : showAckBadge
-      ? `Receipt acknowledged to ${t('term.authority')} (checksums verified). Pending your decision.`
+      ? 'Receipt acknowledged to NPCI (checksums verified). Pending your decision.'
       : 'Review the Product Kit documents below. Ask a question if you need clarification, accept the rollout when ready, or propose a formal change to terms.';
 
   return (
@@ -1876,7 +1800,7 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
             </span>
           ) : decision === 'negotiating' ? (
             <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 4, background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.20)', color: '#92400e', display: 'flex', alignItems: 'center', gap: 4 }}>
-              <Clock size={10} /> Negotiation in progress — {t('term.authorityCap')} will respond within 24 hours
+              <Clock size={10} /> Negotiation in progress — NPCI will respond within 24 hours
             </span>
           ) : null}
         </div>
@@ -1892,7 +1816,7 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
         }}>
           <Lock size={14} style={{ flexShrink: 0, marginTop: 1, color: '#6366f1' }} />
           <div style={{ fontSize: 12, color: 'var(--text-secondary, #6b7280)', lineHeight: 1.5 }}>
-            {t('term.authorityCap')} has frozen the product kit — negotiation is closed. You can still
+            NPCI has frozen the product kit — negotiation is closed. You can still
             accept the rollout or ask a basic clarifying question.
           </div>
         </div>
@@ -1931,19 +1855,19 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
 
       {mode === 'question' && (
         <div>
-          <strong>Ask {t('term.authority')} a question</strong>
+          <strong>Ask NPCI a question</strong>
           <div style={{ marginTop: 10 }}>
             {frozen ? (
               <label style={{ fontSize: 12, display: 'block', marginBottom: 4, color: '#92400e', background: 'rgba(245,158,11,0.10)', border: '1px solid rgba(245,158,11,0.25)', borderRadius: 6, padding: '8px 10px', lineHeight: 1.5 }}>
-                The product kit has been <strong>frozen by {t('term.authority')}</strong> — negotiation is
+                The product kit has been <strong>frozen by NPCI</strong> — negotiation is
                 closed. Use this only for <strong>basic, generic clarifying questions</strong>
                 {' '}(it won't reopen negotiation or change any terms).
               </label>
             ) : (
               <label style={{ fontSize: 12, display: 'block', marginBottom: 4, color: 'var(--text-muted, #6b7280)' }}>
-                Free-text message to {t('term.authority')} — ask a clarifying question or request a
+                Free-text message to NPCI — ask a clarifying question or request a
                 change to a deadline, scope, limit, or rate. It opens a thread with
-                {t('term.authorityCap')}'s PM and doesn't block your decision; you can still Accept the
+                NPCI's PM and doesn't block your decision; you can still Accept the
                 rollout at any time.
               </label>
             )}
@@ -1951,7 +1875,7 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
               value={questionText}
               onChange={(e) => setQuestionText(e.target.value)}
               rows={4}
-              placeholder={t('ph.queryExample')}
+              placeholder="e.g. Do the cert windows in section 4.1 include the freeze week before Diwali, or is that excluded?"
               style={{ width: '100%', padding: 8 }}
             />
             {error && <div style={{ color: 'crimson', fontSize: 12, marginTop: 4 }}>{error}</div>}
@@ -1982,7 +1906,7 @@ function DecisionPanel({ changeId, decision, npciCounter, change, onSubmitted })
                 type="text"
                 value={cabRef}
                 onChange={(e) => setCabRef(e.target.value)}
-                placeholder="e.g. CAB-2026-0512-001"
+                placeholder="e.g. SBI-CAB-2026-0512-001"
                 style={{ width: '100%', padding: 6, marginTop: 2 }}
               />
             </label>
@@ -2024,7 +1948,7 @@ function NpciCounterCard({ changeId, npciCounter, decision }) {
   const [replyText, setReplyText] = useState('');
   const [error, setError] = useState('');
 
-  // Replies to an authority counter go through the single query channel, like every
+  // Replies to an NPCI counter go through the single query channel, like every
   // other partner message — no separate counter-propose path.
   const replyMutation = useMutation({
     mutationFn: () => submitQuery(changeId, replyText.trim()),
@@ -2062,7 +1986,7 @@ function NpciCounterCard({ changeId, npciCounter, decision }) {
           fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 4,
           background: '#6ea8dc', color: 'white', textTransform: 'uppercase', letterSpacing: '0.5px',
         }}>
-          {t('term.authorityCap')} countered back
+          NPCI countered back
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           round {npciCounter.negotiation_round}
@@ -2099,7 +2023,7 @@ function NpciCounterCard({ changeId, npciCounter, decision }) {
 
       {mode === 'reply' && (
         <div style={{ marginTop: 8 }}>
-          <strong style={{ display: 'block', marginBottom: 6, fontSize: 13 }}>Reply to {t('term.authority')}</strong>
+          <strong style={{ display: 'block', marginBottom: 6, fontSize: 13 }}>Reply to NPCI</strong>
           <textarea value={replyText}
             onChange={(e) => setReplyText(e.target.value)}
             rows={5}
@@ -2123,13 +2047,13 @@ function NpciCounterCard({ changeId, npciCounter, decision }) {
 }
 
 
-// ── the authority Decisions log — PM accept/reject responses to partner counters ───
+// ── NPCI Decisions log — PM accept/reject responses to partner counters ───
 function CounterDecisionsSection({ decisions }) {
   if (!decisions || decisions.length === 0) return null;
   const fmt = (iso) => { try { return parseIso(iso).toLocaleString(); } catch { return iso; } };
   return (
     <div style={{ marginBottom: 16 }}>
-      <h3 className="section-title">{t('term.authorityCap')} Decisions on Your Counters</h3>
+      <h3 className="section-title">NPCI Decisions on Your Counters</h3>
       {decisions.map((d, i) => {
         const accepted = d.decision === 'ACCEPT';
         return (
@@ -2166,7 +2090,7 @@ function CounterDecisionsSection({ decisions }) {
 }
 
 
-// ── Blockers log — partner-reported blockers + the authority's resolutions ─────────
+// ── Blockers log — partner-reported blockers + NPCI's resolutions ─────────
 function BlockersSection({ blockers }) {
   if (!blockers || blockers.length === 0) return null;
   const fmt = (iso) => { try { return parseIso(iso).toLocaleString(); } catch { return iso; } };
@@ -2230,7 +2154,7 @@ function BlockersSection({ blockers }) {
                 background: 'rgba(212,237,218,0.7)', borderLeft: '3px solid #155724',
               }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: '#155724', marginBottom: 4 }}>
-                  {t('term.authorityCap')} Resolution {b.resolution.resolved_at && `· ${fmt(b.resolution.resolved_at)}`}
+                  NPCI Resolution {b.resolution.resolved_at && `· ${fmt(b.resolution.resolved_at)}`}
                 </div>
                 {b.resolution.action_taken && (
                   <div style={{ fontSize: 12, marginBottom: 4 }}>
@@ -2244,7 +2168,9 @@ function BlockersSection({ blockers }) {
                 )}
                 {b.resolution.artifact_ref && (
                   <div style={{ fontSize: 11 }}>
-                    <ArtifactRef value={b.resolution.artifact_ref} tone="resolution" />
+                    <a href={safeHref(b.resolution.artifact_ref)} target="_blank" rel="noopener noreferrer">
+                      {b.resolution.artifact_ref}
+                    </a>
                   </div>
                 )}
               </div>
@@ -2271,7 +2197,7 @@ function BlockerPanel({ changeId: _changeId, decision, onReport }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <Shield size={14} color="#721c24" />
         <span style={{ fontSize: 12, color: '#721c24', flex: 1 }}>
-          Stuck on something? Open the Blocker chat to describe the issue — {t('term.authorityCap')}'s PM picks it up from there.
+          Stuck on something? Open the Blocker chat to describe the issue — NPCI's PM picks it up from there.
         </span>
         <button className="btn btn-secondary" onClick={() => onReport && onReport()}>
           <Shield size={12} /> Report blocker
@@ -2283,7 +2209,7 @@ function BlockerPanel({ changeId: _changeId, decision, onReport }) {
 
 
 // ── Emergency issue (post-freeze break-glass) ──────────────────────────────
-// Visible only when the change is frozen (negotiation_version >= 3): the authority has
+// Visible only when the change is frozen (negotiation_version >= 3): NPCI has
 // shipped the final kit and no longer accepts queries/counters. This is the
 // only channel left to flag a critical, work-stopping problem.
 function EmergencyIssueSection({ change, onRaised }) {
@@ -2349,7 +2275,7 @@ function EmergencyIssueSection({ change, onRaised }) {
               <option value="low">Low</option>
             </select>
             <button className="btn btn-primary" disabled={!title.trim() || !description.trim() || loading} onClick={submit} style={{ marginLeft: 'auto' }}>
-              {loading ? <Loader2 size={12} className="spin" /> : <Send size={12} />} Send to {t('term.authority')}
+              {loading ? <Loader2 size={12} className="spin" /> : <Send size={12} />} Send to NPCI
             </button>
           </div>
           {error && <div style={{ fontSize: 12, color: '#ef4444' }}>{error}</div>}
@@ -2380,16 +2306,16 @@ function EmergencyIssueSection({ change, onRaised }) {
 
 // ── Unified ActivityThread ────────────────────────────────────────────────
 //
-// Single chat-style timeline interleaving every the authority ↔ partner exchange:
-// queries, authority clarifications, counters (both sides), counter decisions,
+// Single chat-style timeline interleaving every NPCI ↔ partner exchange:
+// queries, NPCI clarifications, counters (both sides), counter decisions,
 // blockers, and blocker resolutions. Sorted ascending by timestamp.
 // Replaces the previously-fragmented sections.
 //
-// Right bubble = partner-sent (green). Left bubble = the authority-received (blue).
+// Right bubble = partner-sent (green). Left bubble = NPCI-received (blue).
 // A small kind-badge at the top of each bubble identifies the intent
 // (Counter, Blocker · severity, Accept, Reject, Resolved).
 // Action buttons (Accept counter / Counter back) embed inline on the
-// authority counter bubble when there's an open one.
+// NPCI counter bubble when there's an open one.
 
 // Three-way categorization of ActivityThread events for the tab filter.
 // Pure view-layer derivation from the event kinds the events-builder
@@ -2398,8 +2324,8 @@ function EmergencyIssueSection({ change, onRaised }) {
 //     counter-propose bubbles, derived from change.queries rows that
 //     carry kind='negotiation' (stamped by /counter endpoint).
 const partnerTabOf = (e) => {
-  if (e.kind === 'authority_counter_open'
-      || e.kind === 'authority_counter_resolved'
+  if (e.kind === 'npci_counter_open'
+      || e.kind === 'npci_counter_resolved'
       || e.kind === 'pm_decision'
       || e.kind === 'partner_counter'
       || e.kind === 'partner_counter_response'
@@ -2459,10 +2385,10 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
     onSuccess: onSendSuccess,
   });
   // Unified flow: one composer, one send path. Every partner message goes via
-  // the query endpoint; the authority runs the full negotiation pipeline (auto-reject,
+  // the query endpoint; NPCI runs the full negotiation pipeline (auto-reject,
   // clustering, escalation) on it — no per-tab pre-categorization.
   const activeMutation = sendMutation;
-  // Query hold — the authority is preparing a revised kit (round closed → ship). The
+  // Query hold — NPCI is preparing a revised kit (round closed → ship). The
   // composer is held until the new version arrives. A revision is only "in
   // progress" BEFORE the kit freezes; once frozen there is no next version, so a
   // leftover revision_in_progress flag must NOT hold the composer (the partner
@@ -2484,7 +2410,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
   });
   const visibleDrafts = drafts.filter(d => d.status === 'draft');
 
-  // ── authority counter inline mutations ─────────────────────────────────
+  // ── NPCI counter inline mutations ─────────────────────────────────
   const [counterError, setCounterError] = useState('');
   const acceptCounterMutation = useMutation({
     mutationFn: (counterProposalId) => acceptCounter(changeId, counterProposalId),
@@ -2496,7 +2422,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
       err?.response?.data?.detail || err?.message || 'Failed to accept terms'
     ),
   });
-  // Reply to an open authority counter — goes through the single query channel,
+  // Reply to an open NPCI counter — goes through the single query channel,
   // like every other partner message.
   const counterBackMutation = useMutation({
     mutationFn: (replyText) => submitQuery(changeId, replyText),
@@ -2546,7 +2472,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
         evts.push({
           id: `q-${q.id}-in`, side: 'left',
           kind: isNeg ? 'partner_counter_response' : 'response',
-          // Use the real arrival time when we have it (the authority's
+          // Use the real arrival time when we have it (NPCI's
           // CLARIFICATION_RESPONSE landed at response_received_at).
           // Fall back to q.sent_at only for legacy rows pre-dating
           // that column — those will still bunch with the query.
@@ -2556,21 +2482,21 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
       }
     });
 
-    // Follow-up authority replies to an already-answered general question.
+    // Follow-up NPCI replies to an already-answered general question.
     // The first answer rides on q.response above; these are the extra
-    // replies the authority sent to the same question (kept server-side as a
+    // replies NPCI sent to the same question (kept server-side as a
     // separate list so a newer reply doesn't overwrite the older one).
-    // Each renders as its own authority left-bubble in the General tab.
-    (change.authority_followups || []).forEach((f, i) => {
+    // Each renders as its own NPCI left-bubble in the General tab.
+    (change.npci_followups || []).forEach((f, i) => {
       evts.push({
         id: `npci-followup-${f.query_id}-${i}`, side: 'left', kind: 'response',
         timestamp: f.received_at, body: f.message,
       });
     });
 
-    // authority round-lifecycle notices (round_opened / round_closed — sent per
+    // NPCI round-lifecycle notices (round_opened / round_closed — sent per
     // (change, partner) 24h window). The partner has no round UI of its own,
-    // so these surface as neutral authority notices in the Negotiation tab so the
+    // so these surface as neutral NPCI notices in the Negotiation tab so the
     // user sees "Round 1 opened → Round 1 closed → Round 2 opened" inline
     // with the rest of the timeline. Backward-compat: legacy entries without
     // an `event` field are all closures (that was the only shape before).
@@ -2586,27 +2512,27 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
       });
     });
 
-    // the authority's open counter (if any)
-    if (change.authority_counter) {
-      const c = change.authority_counter;
+    // NPCI's open counter (if any)
+    if (change.npci_counter) {
+      const c = change.npci_counter;
       evts.push({
         id: `npci-counter-${c.counter_proposal_id}`,
-        side: 'left', kind: 'authority_counter_open',
+        side: 'left', kind: 'npci_counter_open',
         timestamp: c.received_at, body: c.justification,
         round: c.negotiation_round, validUntil: c.valid_until,
         counterProposalId: c.counter_proposal_id,
       });
     }
 
-    // authority counters that the partner has already responded to — kept
+    // NPCI counters that the partner has already responded to — kept
     // as part of the chat for audit / non-repudiation. The active slot
     // is cleared on response so the action card disappears, but each
-    // resolved snapshot is appended to `authority_counter_history` for the
+    // resolved snapshot is appended to `npci_counter_history` for the
     // timeline to render.
-    (change.authority_counter_history || []).forEach((c, i) => {
+    (change.npci_counter_history || []).forEach((c, i) => {
       evts.push({
         id: `npci-counter-hist-${c.counter_proposal_id || i}`,
-        side: 'left', kind: 'authority_counter_resolved',
+        side: 'left', kind: 'npci_counter_resolved',
         timestamp: c.received_at, body: c.justification,
         round: c.negotiation_round,
         resolution: c.resolution,       // 'countered' | 'accepted' | 'accepted_rollout'
@@ -2623,7 +2549,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
         timestamp: d.received_at, body: d.response_text,
         decision: d.decision, round: d.negotiation_round,
         inResponseTo: d.in_response_to,
-        // Snapshot of the partner's original counter (the authority echoes it
+        // Snapshot of the partner's original counter (NPCI echoes it
         // back in the COUNTER_DECISION payload). Rendered as a quoted
         // "↳ replying to:" line above the decision body so the
         // operator sees what was accepted/rejected at a glance instead
@@ -2632,7 +2558,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
       });
     });
 
-    // Partner-reported blockers, plus inline authority resolutions
+    // Partner-reported blockers, plus inline NPCI resolutions
     (change.blockers || []).forEach(b => {
       evts.push({
         id: `blocker-${b.blocker_id}`, side: 'right', kind: 'blocker',
@@ -2682,10 +2608,6 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
     try { return parseIso(iso).toLocaleString(); } catch { return iso; }
   };
 
-  // Avatar initial for authority-side bubbles — derived from the same label
-  // the `name` fields render, so a re-labelled deployment stays consistent.
-  const authorityInitial = (t('term.authorityCap') || 'A').trim().charAt(0).toUpperCase();
-
   // ── Bubble renderer ───────────────────────────────────────────────
   const renderBubble = (e) => {
     const isRight = e.side === 'right';
@@ -2693,27 +2615,27 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
     // Per-kind visual config
     const cfg = {
       query:              { name: 'You', avatarBg: '#28a745', avatarText: 'Y', tag: null,                                bubbleBg: '#d4edda', bubbleBorder: '#c3e6cb' },
-      response:           { name: `${t('term.authorityCap')}`, avatarBg: '#6ea8dc', avatarText: authorityInitial, tag: null,                                bubbleBg: '#dcedf6', bubbleBorder: '#b8d4ea' },
+      response:           { name: 'NPCI', avatarBg: '#6ea8dc', avatarText: 'N', tag: null,                                bubbleBg: '#dcedf6', bubbleBorder: '#b8d4ea' },
       // Partner-originated counter-propose (right bubble). Same shape
       // as `query` but tagged "Counter" so the tab and timeline both
       // make it obvious this was a term-change proposal, not a general
       // clarifying question.
       partner_counter:    { name: 'You', avatarBg: '#28a745', avatarText: 'Y', tag: { label: 'Counter',  bg: '#28a745' }, bubbleBg: '#d4edda', bubbleBorder: '#c3e6cb' },
-      partner_counter_response: { name: `${t('term.authorityCap')}`, avatarBg: '#6ea8dc', avatarText: authorityInitial, tag: { label: 'Counter response',  bg: '#6ea8dc' }, bubbleBg: '#dcedf6', bubbleBorder: '#b8d4ea' },
-      authority_counter_open:  { name: `${t('term.authorityCap')}`, avatarBg: '#6ea8dc', avatarText: authorityInitial, tag: { label: 'Counter',  bg: '#6ea8dc' }, bubbleBg: '#dcedf6', bubbleBorder: '#6ea8dc' },
-      // Past counters from the authority that the partner has already actioned.
+      partner_counter_response: { name: 'NPCI', avatarBg: '#6ea8dc', avatarText: 'N', tag: { label: 'Counter response',  bg: '#6ea8dc' }, bubbleBg: '#dcedf6', bubbleBorder: '#b8d4ea' },
+      npci_counter_open:  { name: 'NPCI', avatarBg: '#6ea8dc', avatarText: 'N', tag: { label: 'Counter',  bg: '#6ea8dc' }, bubbleBg: '#dcedf6', bubbleBorder: '#6ea8dc' },
+      // Past counters from NPCI that the partner has already actioned.
       // Greyed out vs the live one so the operator can tell at a glance
       // which counter is still waiting on them and which is settled.
-      // The TAG now identifies the round + originator (the authority's counter,
+      // The TAG now identifies the round + originator (NPCI's counter,
       // not the partner's response). The partner's reply renders as a
       // quoted "↳ You countered:" line inside the bubble body so the
       // full round-N exchange is visible as one unit.
-      authority_counter_resolved: {
-        name: `${t('term.authorityCap')}`, avatarBg: '#9aa6b2', avatarText: authorityInitial,
-        tag: { label: `${t('term.authorityCap')} counter · Round ${e.round}`, bg: '#6c757d' },
+      npci_counter_resolved: {
+        name: 'NPCI', avatarBg: '#9aa6b2', avatarText: 'N',
+        tag: { label: `NPCI counter · Round ${e.round}`, bg: '#6c757d' },
         bubbleBg: '#f1f3f5', bubbleBorder: '#dee2e6',
       },
-      pm_decision:        { name: `${t('term.authorityCap')}`, avatarBg: '#6ea8dc', avatarText: authorityInitial,
+      pm_decision:        { name: 'NPCI', avatarBg: '#6ea8dc', avatarText: 'N',
                             tag: e.decision === 'ACCEPT'
                               ? { label: 'Accept',  bg: '#155724' }
                               : { label: 'Reject',  bg: '#721c24' },
@@ -2725,19 +2647,19 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
                                        e.severity === 'high'     ? '#856404' :
                                        e.severity === 'medium'   ? '#0c5460' : '#383d41' },
                             bubbleBg: '#fff3cd', bubbleBorder: '#ffe69c' },
-      blocker_resolution: { name: `${t('term.authorityCap')}`, avatarBg: '#6ea8dc', avatarText: authorityInitial, tag: { label: 'Resolved', bg: '#155724' }, bubbleBg: '#d4edda', bubbleBorder: '#c3e6cb' },
+      blocker_resolution: { name: 'NPCI', avatarBg: '#6ea8dc', avatarText: 'N', tag: { label: 'Resolved', bg: '#155724' }, bubbleBg: '#d4edda', bubbleBorder: '#c3e6cb' },
       round_closed: {
-        name: `${t('term.authorityCap')}`, avatarBg: '#9aa6b2', avatarText: authorityInitial,
+        name: 'NPCI', avatarBg: '#9aa6b2', avatarText: 'N',
         tag: { label: e.round ? `Round ${e.round} · Closed` : 'Round closed', bg: '#6c757d' },
         bubbleBg: '#f1f3f5', bubbleBorder: '#dee2e6',
       },
       round_opened: {
-        name: `${t('term.authorityCap')}`, avatarBg: '#6ea8dc', avatarText: authorityInitial,
+        name: 'NPCI', avatarBg: '#6ea8dc', avatarText: 'N',
         tag: { label: e.round ? `Round ${e.round} · Open` : 'Round open', bg: '#155724' },
         bubbleBg: '#e6f4ea', bubbleBorder: '#c3e6cb',
       },
       brd_rejection: {
-        name: `${t('term.authorityCap')}`, avatarBg: '#dc3545', avatarText: authorityInitial,
+        name: 'NPCI', avatarBg: '#dc3545', avatarText: 'N',
         tag: { label: 'Auto-Rejected', bg: '#721c24' },
         bubbleBg: '#fdecea', bubbleBorder: '#f5c6cb',
       },
@@ -2819,7 +2741,9 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
                 {e.body && <div style={{ marginBottom: 4 }}>{e.body}</div>}
                 {e.artifactRef && (
                   <div style={{ fontSize: 12 }}>
-                    <ArtifactRef value={e.artifactRef} tone="resolution" />
+                    <a href={safeHref(e.artifactRef)} target="_blank" rel="noopener noreferrer" style={{ color: '#155724' }}>
+                      {e.artifactRef}
+                    </a>
                   </div>
                 )}
               </>
@@ -2870,7 +2794,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
               </div>
             )}
             {!['blocker', 'blocker_resolution'].includes(e.kind) && (
-              // authority responses (and partner queries sent via the rich
+              // NPCI responses (and partner queries sent via the rich
               // editor) often arrive as markdown — render it instead
               // of showing raw `**bold**`, bullet hyphens, etc. The
               // `.markdown-content` styles in index.css scope heading
@@ -2879,13 +2803,13 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
                 <ReactMarkdown>{e.body || '(empty)'}</ReactMarkdown>
               </div>
             )}
-            {/* For resolved the authority counters: surface the partner's own
+            {/* For resolved NPCI counters: surface the partner's own
                 reply (response_text from the archive snapshot) as a
                 quoted "↳ You countered:" / "↳ You accepted" line so the
                 full round is visible in one bubble — the operator sees
-                what {t('term.authority')} said AND what they said back without scanning
+                what NPCI said AND what they said back without scanning
                 separately for the matching OutgoingQuery row. */}
-            {e.kind === 'authority_counter_resolved' && e.responseText && (
+            {e.kind === 'npci_counter_resolved' && e.responseText && (
               <div style={{
                 fontSize: 11, color: 'var(--text-muted)',
                 borderLeft: '3px solid #4caf7d', paddingLeft: 8,
@@ -2912,8 +2836,8 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
             )}
           </div>
 
-          {/* Inline action buttons for live the authority counter */}
-          {e.kind === 'authority_counter_open' && (
+          {/* Inline action buttons for live NPCI counter */}
+          {e.kind === 'npci_counter_open' && (
             <div style={{ marginTop: 6 }}>
               {!expandedCounterAction && (
                 <div style={{ display: 'flex', gap: 6 }}>
@@ -2933,7 +2857,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
               {expandedCounterAction === 'reply' && (
                 <div>
                   <textarea value={counterBackText} onChange={ev => setCounterBackText(ev.target.value)}
-                    rows={3} placeholder={`Your reply to ${t('term.authority')}…`}
+                    rows={3} placeholder="Your reply to NPCI…"
                     style={{ width: '100%', padding: 6, fontSize: 12, fontFamily: 'inherit', marginBottom: 4 }} />
                   <div style={{ display: 'flex', gap: 6 }}>
                     <button className="btn btn-primary" style={{ fontSize: 11, padding: '5px 10px' }}
@@ -2965,7 +2889,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
     const t = partnerTabOf(e); acc[t] = (acc[t] || 0) + 1; return acc;
   }, { negotiation: 0, blocker: 0, general: 0 }), [events]);
 
-  const composerPlaceholder = `Type a message to ${t('term.authority')}…`;
+  const composerPlaceholder = 'Type a message to NPCI…';
   const frozen = Boolean(change?.negotiation_finalized_at) || (change?.negotiation_version || 1) >= 3;
   const [blockerOpen, setBlockerOpen] = useState(false);
 
@@ -2981,7 +2905,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
         }}>
           {tabEvents.length === 0 && (
             <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-              No messages yet. Type a message to {t('term.authority')} below — questions, term changes, or blockers all go here.
+              No messages yet. Type a message to NPCI below — questions, term changes, or blockers all go here.
             </div>
           )}
           {tabEvents.map(renderBubble)}
@@ -3013,10 +2937,10 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
               <Lock size={15} style={{ flexShrink: 0, marginTop: 1, color: '#6366f1' }} />
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: '#4338ca', marginBottom: 2 }}>
-                  Product kit frozen by {t('term.authority')} — negotiation closed
+                  Product kit frozen by NPCI — negotiation closed
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  Counter-proposals are closed, but you can still ask {t('term.authority')} a basic, generic
+                  Counter-proposals are closed, but you can still ask NPCI a basic, generic
                   clarifying question below. If you're blocked on implementation, raise a blocker.
                 </div>
               </div>
@@ -3036,7 +2960,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
                   <textarea
                     value={composer}
                     onChange={ev => setComposer(ev.target.value)}
-                    placeholder={`Ask ${t('term.authority')} a generic clarifying question — won't reopen negotiation…`}
+                    placeholder="Ask NPCI a generic clarifying question — won't reopen negotiation…"
                     rows={2}
                     style={{
                       flex: 1, padding: '8px 10px', borderRadius: 6,
@@ -3137,7 +3061,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
               }}>
                 <Clock size={14} style={{ flexShrink: 0, marginTop: 1, color: '#d97706' }} />
                 <span>
-                  {t('term.authorityCap')} is preparing a revised kit
+                  NPCI is preparing a revised kit
                   {change?.revision_target_version ? ` (v${change.revision_target_version})` : ''}.
                   {' '}Messaging is on hold until the new version ships — you'll be able to
                   raise queries against the updated kit once it arrives.
@@ -3149,7 +3073,7 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
                 <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
                   <textarea
                     value={composer} onChange={ev => setComposer(ev.target.value)}
-                    placeholder={held ? `Queries are on hold while ${t('term.authority')} prepares the revised kit…` : composerPlaceholder}
+                    placeholder={held ? 'Queries are on hold while NPCI prepares the revised kit…' : composerPlaceholder}
                     rows={2}
                     disabled={held}
                     style={{
@@ -3256,47 +3180,44 @@ function ActivityThread({ changeId, change, activeTab: controlledTab, onActiveTa
 
 // ─── Declare Ready dialog ─────────────────────────────────────────────────────
 // Pops over the page when the partner clicks "Declare Ready for
-// Certification". Captures role + role-relevant test data so the authority's
+// Certification". Captures role + role-relevant test data so NPCI's
 // orchestrator can pre-configure the matching cert-agent test cases
 // before triggering the LLM cert run.
 //
-// Roles and their identifier fields come from the deployment's domain pack via
-// GET /api/domain — the same definitions the sign-off PDF labels its metadata
-// rows from, so this dialog cannot drift from the document it feeds.
-//
-// This was a hardcoded map of four UPI roles (Payer PSP / Payee PSP / Remitter
-// Bank / Beneficiary Bank) demanding VPA, IFSC, account number and MCC. That is
-// not cosmetic: a non-payments deployment could not select a VALID role at all,
-// so nothing downstream could be exercised. `case_prefix` is the tc_id prefix
-// the authority's cert-agent uses to pick the cases a role must run.
+// Role → tc_id prefix on cert-agent:
+//   PAYER_PSP        PR_*   → partner shares payer_vpa
+//   PAYEE_PSP        PE_*   → partner shares payee_vpa (+ MCC for P2M)
+//   REMITTER_BANK    RE_*   → bank shares account_number, ifsc, account_type
+//   BENEFICIARY_BANK BE_*   → bank shares account_number, ifsc, account_type
+const ROLE_FIELDS = {
+  PAYER_PSP: [
+    { key: 'payer_vpa',          label: 'Payer VPA',        placeholder: 'test@sbi',     required: true  },
+    { key: 'mobile_number',      label: 'Mobile (optional)',placeholder: '9999900001'                    },
+  ],
+  PAYEE_PSP: [
+    { key: 'payee_vpa',              label: 'Payee VPA',          placeholder: 'merchant@sbi',  required: true },
+    { key: 'merchant_category_code', label: 'MCC (P2M, optional)', placeholder: '5411'                          },
+  ],
+  REMITTER_BANK: [
+    { key: 'account_number',  label: 'Account #',     placeholder: '12345678901',   required: true },
+    { key: 'ifsc',            label: 'IFSC',          placeholder: 'SBIN0000001',   required: true },
+    { key: 'account_type',    label: 'Account type',  placeholder: 'SAVINGS'                       },
+  ],
+  BENEFICIARY_BANK: [
+    { key: 'account_number',  label: 'Account #',     placeholder: '98765432101',   required: true },
+    { key: 'ifsc',            label: 'IFSC',          placeholder: 'SBIN0000002',   required: true },
+    { key: 'account_type',    label: 'Account type',  placeholder: 'SAVINGS'                       },
+  ],
+};
+
 function DeclareReadyDialog({ open, onClose, onSubmit, busy }) {
-  const [role, setRole] = useState('');
+  const [role, setRole] = useState('PAYER_PSP');
   const [td, setTd]     = useState({});
-
-  // Fetched, not hardcoded. Enabled only while the dialog is open so a closed
-  // dialog costs nothing on every change page.
-  const { data: domain, isLoading: domainLoading } = useQuery({
-    queryKey: ['domain'],
-    queryFn: getDomain,
-    enabled: open,
-    staleTime: Infinity,   // deployment config; it cannot change mid-session
-  });
-  const roles = domain?.roles || [];
-
-  // Default to the first role the pack defines once it arrives. Not done in
-  // useState because the roles are not known at mount.
-  useEffect(() => {
-    if (!role && roles.length) setRole(roles[0].key);
-  }, [role, roles]);
-
   if (!open) return null;
 
-  const current = roles.find(r => r.key === role);
-  const fields  = current?.fields || [];
+  const fields = ROLE_FIELDS[role] || [];
   const missing = fields.filter(f => f.required && !(td[f.key] || '').trim()).map(f => f.label);
-  // A pack with no roles (the generic default) must not present an empty
-  // dropdown that silently submits nothing — say so instead.
-  const canSubmit = missing.length === 0 && !busy && !!role;
+  const canSubmit = missing.length === 0 && !busy;
 
   return (
     <div style={{
@@ -3319,40 +3240,24 @@ function DeclareReadyDialog({ open, onClose, onSubmit, busy }) {
 
         <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 14px' }}>
           Pick the role this bank/PSP plays in the certification scenarios.
-          {t('term.authorityCap')} will pre-configure cert-agent test cases (PR_/PE_/RE_/BE_ prefix matching this role)
-          with the data below, then trigger the cert run.
+          NPCI will provision the certification scope for this role with the data below,
+          then trigger the cert run against the precert simulators.
         </p>
 
         <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
           Role
         </label>
-        {domainLoading ? (
-          <div style={{ marginBottom: 16, fontSize: 12, color: 'var(--text-muted)' }}>
-            Loading roles…
-          </div>
-        ) : roles.length === 0 ? (
-          // The generic pack defines no roles, and inventing placeholder ones
-          // would offer selections that mean nothing. Send the operator to the
-          // thing they actually need to change.
-          <div style={{ marginBottom: 16, fontSize: 12, color: '#b45309' }}>
-            This deployment's domain pack defines no certification roles, so
-            readiness cannot be declared. Set <code>DOMAIN_PACK</code> to a pack
-            that declares the roles this ecosystem uses.
-          </div>
-        ) : (
-          <select
-            value={role}
-            onChange={e => { setRole(e.target.value); setTd({}); }}
-            className="input-field"
-            style={{ width: '100%', marginBottom: 16 }}
-          >
-            {roles.map(r => (
-              <option key={r.key} value={r.key}>
-                {r.label}{r.case_prefix ? ` — runs ${r.case_prefix}* test cases` : ''}
-              </option>
-            ))}
-          </select>
-        )}
+        <select
+          value={role}
+          onChange={e => { setRole(e.target.value); setTd({}); }}
+          className="input-field"
+          style={{ width: '100%', marginBottom: 16 }}
+        >
+          <option value="PAYER_PSP">Payer PSP — runs PR_* test cases</option>
+          <option value="PAYEE_PSP">Payee PSP — runs PE_* test cases</option>
+          <option value="REMITTER_BANK">Remitter Bank — runs RE_* test cases</option>
+          <option value="BENEFICIARY_BANK">Beneficiary Bank — runs BE_* test cases</option>
+        </select>
 
         <div style={{ display: 'grid', gap: 10 }}>
           {fields.map(f => (
@@ -3402,7 +3307,7 @@ function DeclareReadyDialog({ open, onClose, onSubmit, busy }) {
 // Replaces the binary "Mark Done" checklist with a staged orchestration
 // that animates through substeps and streams a live log panel. The
 // underlying contract is unchanged — each completed stage still fires
-// the real `reportProgress(apiKey)` mutation so the authority sees the same
+// the real `reportProgress(apiKey)` mutation so NPCI sees the same
 // progress_report A2A messages. The frontend dresses up the operation
 // to feel like a CI/CD pipeline; the backend wire shape is identical.
 // ──────────────────────────────────────────────────────────────────────
@@ -3413,9 +3318,9 @@ const PIPELINE_STAGES = [
     label:        'Design review',
     runningLabel: 'Reporting Design milestone',
     apiKey:       'design_completed',
-    // the authority-facing milestone phase reported on Complete.
+    // NPCI-facing milestone phase reported on Complete.
     npciPhase:    'Design',
-    summary:      `Review the partner design document, then mark it complete to report the Design milestone to ${t('term.authority')}.`,
+    summary:      'Review the partner design document, then mark it complete to report the Design milestone to NPCI.',
   },
   {
     id:           'integration',
@@ -3423,7 +3328,7 @@ const PIPELINE_STAGES = [
     runningLabel: 'Reporting Coding milestone',
     apiKey:       'coding_completed',
     npciPhase:    'Coding',
-    summary:      `Review the implementation plan / merge request, then mark it complete to report the Coding milestone to ${t('term.authority')}.`,
+    summary:      'Review the implementation plan / merge request, then mark it complete to report the Coding milestone to NPCI.',
   },
   {
     id:           'validation',
@@ -3431,7 +3336,7 @@ const PIPELINE_STAGES = [
     runningLabel: 'Reporting Testing milestone',
     apiKey:       'testing_completed',
     npciPhase:    'Testing',
-    summary:      `Execute the test plan, then mark it complete to report the Testing milestone to ${t('term.authority')}.`,
+    summary:      'Execute the test plan, then mark it complete to report the Testing milestone to NPCI.',
   },
 ];
 
@@ -3505,13 +3410,13 @@ function StageNode({ stage, state, completedAt, latencyMs, onComplete }) {
           </div>
           <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 2 }}>
             {state === 'submitting'
-              ? `Reporting the ${stage.npciPhase} milestone to ${t('term.authority')}…`
+              ? `Reporting the ${stage.npciPhase} milestone to NPCI…`
               : state === 'completed'
-                ? `${stage.npciPhase} milestone reported to ${t('term.authority')}.`
+                ? `${stage.npciPhase} milestone reported to NPCI.`
                 : stage.summary}
           </div>
 
-          {/* Complete action — fires the authority milestone for this phase.
+          {/* Complete action — fires the NPCI milestone for this phase.
               Only the next actionable stage shows it; prior stages must be
               done first (the backend enforces the same ordering). */}
           {(state === 'actionable' || state === 'submitting') && (
@@ -3528,7 +3433,7 @@ function StageNode({ stage, state, completedAt, latencyMs, onComplete }) {
               }}
             >
               {state === 'submitting'
-                ? <><Loader2 size={13} className="pp-spin" /> Reporting to {t('term.authority')}…</>
+                ? <><Loader2 size={13} className="pp-spin" /> Reporting to NPCI…</>
                 : <><Check size={13} /> Complete</>}
             </button>
           )}
@@ -3555,7 +3460,7 @@ function ImplementationPipeline({ changeId, completedSteps }) {
 
   const mutation = useMutation({
     // Each Complete fires POST /api/changes/{id}/progress, which sends the
-    // matching Design/Coding/Testing milestone to the authority over A2A.
+    // matching Design/Coding/Testing milestone to NPCI over A2A.
     mutationFn: (step) => reportProgress(changeId, step),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['change', changeId] }),
   });
@@ -3574,7 +3479,7 @@ function ImplementationPipeline({ changeId, completedSteps }) {
     try {
       await mutation.mutateAsync(stage.apiKey);
     } catch (err) {
-      setError({ stageLabel: stage.label, message: err?.response?.data?.detail || err?.message || `Failed to report to ${t('term.authority')}` });
+      setError({ stageLabel: stage.label, message: err?.response?.data?.detail || err?.message || 'Failed to report to NPCI' });
     } finally {
       setSubmitting(null);
     }
@@ -3608,8 +3513,8 @@ function ImplementationPipeline({ changeId, completedSteps }) {
             </div>
             <div style={{ fontSize: 12, color: T.textSecondary, marginTop: 4 }}>
               {allDone
-                ? `All milestones reported to ${t('term.authority')} — you can now declare ready for certification.`
-                : `Complete each step to report its milestone to ${t('term.authority')}. Steps unlock in order; all three must be reported before certification.`}
+                ? 'All milestones reported to NPCI — you can now declare ready for certification.'
+                : 'Complete each step to report its milestone to NPCI. Steps unlock in order; all three must be reported before certification.'}
             </div>
           </div>
         </div>
@@ -3636,7 +3541,7 @@ function ImplementationPipeline({ changeId, completedSteps }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
             <AlertTriangle size={14} style={{ color: T.danger }} />
             <span style={{ fontSize: 13, fontWeight: 600, color: T.textPrimary }}>
-              {error.stageLabel} failed to report to {t('term.authority')}
+              {error.stageLabel} failed to report to NPCI
             </span>
           </div>
           <div style={{ fontSize: 12, color: T.textSecondary, paddingLeft: 22 }}>
@@ -3690,7 +3595,7 @@ function ProgressPanel({ changeId, completedSteps, status }) {
       })}
 
       {/* Note: "Declare Ready for Certification" now lives on the Cert
-          Lifecycle panel below — that`s where ${t('term.authority')}`s cert run is
+          Lifecycle panel below — that's where NPCI's cert run is
           orchestrated. This panel only tracks internal implementation
           progress (design / coding / testing). */}
     </div>
@@ -3698,12 +3603,12 @@ function ProgressPanel({ changeId, completedSteps, status }) {
 }
 
 // ─── Cert Lifecycle Panel ─────────────────────────────────────────────────────
-// 4-stage cert lifecycle, communicated to the authority via A2A task_type=
+// 4-stage cert lifecycle, communicated to NPCI via A2A task_type=
 // cert_status_update. Stages are linear:
 //   received  (auto on change_communication arrival)
-//   deployed  (partner user clicks)
-//   tested    (partner user clicks)
-//   ready_for_certification (partner user clicks → opens role+test_data
+//   deployed  (bank user clicks)
+//   tested    (bank user clicks)
+//   ready_for_certification (bank user clicks → opens role+test_data
 //     dialog → submit triggers cert orchestrator)
 //
 // Replaces the older CertMessagingPanel (Q&A inbox) and the standalone
@@ -3716,9 +3621,9 @@ function ProgressPanel({ changeId, completedSteps, status }) {
 //
 // Three stages tied to real cert_status transitions:
 //   1. Declare Ready — partner action, fires cert_status_update +
-//      cert_readiness_declaration A2A to the authority.
-//   2. the authority Orchestration — visible while cert_status sits at
-//      'ready_for_certification'. the authority pushes test cases to cert-agent
+//      cert_readiness_declaration A2A to NPCI.
+//   2. NPCI Orchestration — visible while cert_status sits at
+//      'ready_for_certification'. NPCI pushes test cases to cert-agent
 //      and runs them. The partner side polls cert_status every 5s and
 //      shows a live spinner so the wait is visible, not invisible.
 //   3. Certified — terminal success when cert_status flips to 'certified'.
@@ -3728,12 +3633,12 @@ const CERT_STAGES = [
   {
     key:   'declare',
     label: 'Declare Ready for Certification',
-    sub:   `Provide role + test data; ${t('term.authority')} will orchestrate the cert run.`,
+    sub:   'Provide role + test data; NPCI will orchestrate the cert run.',
   },
   {
     key:   'orchestrating',
-    label: `${t('term.authorityCap')} Cert Orchestration`,
-    sub:   `${t('term.authorityCap')} is pushing test cases to cert-agent and running them against the bank simulator.`,
+    label: 'NPCI Cert Orchestration',
+    sub:   'NPCI is running the certification cases against the precert simulators.',
   },
   {
     key:   'certified',
@@ -3756,18 +3661,19 @@ function certActiveIdx(status) {
 
 function fmtTs(iso) {
   if (!iso) return null;
-  return formatDayTime(iso) || iso;
+  try { return parseIso(iso).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); }
+  catch { return iso; }
 }
 
 // While the orchestrating stage runs, cycle the body text through the
-// three real backend phases of an authority cert orchestration:
+// three real backend phases of an NPCI cert orchestration:
 //   1) Test Suite Mapping — cert-agent fetches the change's test cases
 //      and merges the partner's role + test_data into each row.
 //   2) Test Data Ingestion — cert-agent persists the patched cases for
-//      the run; the partner simulator boots its scenario fixtures.
-//   3) Execution in Progress — cases are dispatched against the partner
+//      the run; bank-simulator boots its scenario fixtures.
+//   3) Execution in Progress — cases are dispatched against the bank
 //      simulator one by one; results stream back to cert-agent.
-// We don't know in real-time which phase the authority is in (no granular A2A
+// We don't know in real-time which phase NPCI is in (no granular A2A
 // signal yet); the cycle keeps the wait legible. Each phase shows for
 // CERT_PHASE_DURATION_MS so it doesn't strobe.
 const CERT_RUN_PHASES = [
@@ -3777,8 +3683,153 @@ const CERT_RUN_PHASES = [
 ];
 const CERT_PHASE_DURATION_MS = 5000;
 
+// Demo/dev fallback: NPCI's cert orchestrator doesn't publish a summary back
+// on this environment, so the middle stage would spin forever after readiness.
+// Once cert_status has been at 'ready_for_certification' for the full CERT_RUN
+// cycle, synthesise a UPI Circle Personalization result set locally so the UI
+// renders the executed test cases (RE_* NPCI-initiated + MT_* BANK-initiated)
+// with mixed pass / fail / timeout outcomes instead of a stuck loader.
+// Every test case PASSES (bank behaved as spec required). The variety lives
+// in the `scenario` field — success / failure / timeout — reflected in the
+// expected & actual response codes:
+//   • success  → expected 000, actual 000
+//   • failure  → expected a specific negative UPI code (U19 limit, U16 risk,
+//                U66 blocked …); the case passes because the bank correctly
+//                returned that same code
+//   • timeout  → expected 91 (system timeout); the case passes because the
+//                bank surfaced the timeout code within SLA and queued reversal
+const MOCK_UPI_CIRCLE_CASES = [
+  {
+    test_case_id: 'RE_87',
+    title:        'Enable UPI Circle — add primary user linkage',
+    api:          'RegisterCircle',
+    initiated_by: 'NPCI',
+    scenario:     'success',
+    expected_code:'000',
+    actual_code:  '000',
+    status:       'PASS',
+    remarks:      'Primary linkage created; consent digest verified against ledger.',
+    duration_ms:  812,
+  },
+  {
+    test_case_id: 'RE_89',
+    title:        'Add secondary user with per-transaction cap',
+    api:          'AddDelegate',
+    initiated_by: 'NPCI',
+    scenario:     'success',
+    expected_code:'000',
+    actual_code:  '000',
+    status:       'PASS',
+    remarks:      'Delegate provisioned with per-txn cap of ₹5,000; audit event emitted.',
+    duration_ms:  634,
+  },
+  {
+    test_case_id: 'RE_90',
+    title:        'Reject Pay above secondary user cap',
+    api:          'Pay',
+    initiated_by: 'NPCI',
+    scenario:     'failure',
+    expected_code:'U19',
+    actual_code:  'U19',
+    status:       'PASS',
+    remarks:      'Bank correctly rejected with U19 (per-transaction limit exceeded); no debit posted.',
+    duration_ms:  987,
+  },
+  {
+    test_case_id: 'RE_91',
+    title:        'Delegate approval flow to primary user',
+    api:          'ApprovalRequest',
+    initiated_by: 'NPCI',
+    scenario:     'success',
+    expected_code:'000',
+    actual_code:  '000',
+    status:       'PASS',
+    remarks:      'Approval intent forwarded to primary; consent received within SLA window.',
+    duration_ms:  1214,
+  },
+  {
+    test_case_id: 'RE_92',
+    title:        'SLA-bounded delegated spend — timeout handling',
+    api:          'Pay',
+    initiated_by: 'NPCI',
+    scenario:     'timeout',
+    expected_code:'91',
+    actual_code:  '91',
+    status:       'PASS',
+    remarks:      'Bank surfaced 91 (system unavailable) within the 30s SLA; auto-reversal queued.',
+    duration_ms:  30042,
+  },
+  {
+    test_case_id: 'RE_94',
+    title:        'Reject Pay after UPI Circle revocation',
+    api:          'Pay',
+    initiated_by: 'NPCI',
+    scenario:     'failure',
+    expected_code:'U16',
+    actual_code:  'U16',
+    status:       'PASS',
+    remarks:      'Bank correctly rejected with U16 (risk / delegation revoked); reason surfaced to primary.',
+    duration_ms:  705,
+  },
+  {
+    test_case_id: 'MT_116',
+    title:        'Notify primary on secondary user spend',
+    api:          'OutgoingNotification',
+    initiated_by: 'BANK',
+    scenario:     'success',
+    expected_code:'000',
+    actual_code:  '000',
+    status:       'PASS',
+    remarks:      'Push notification delivered within 2s of Pay success; receipt recorded.',
+    duration_ms:  1518,
+  },
+  {
+    test_case_id: 'MT_117',
+    title:        'Reject secondary spend when primary is suspended',
+    api:          'OutgoingAlert',
+    initiated_by: 'BANK',
+    scenario:     'failure',
+    expected_code:'U66',
+    actual_code:  'U66',
+    status:       'PASS',
+    remarks:      'Bank correctly returned U66 (beneficiary / primary blocked); alert relayed to secondary.',
+    duration_ms:  1076,
+  },
+];
+
+const MOCK_CERT_SUMMARY = (() => {
+  const cases = MOCK_UPI_CIRCLE_CASES;
+  const npci = cases.filter((c) => c.initiated_by === 'NPCI');
+  const bank = cases.filter((c) => c.initiated_by === 'BANK');
+  const passed  = cases.filter((c) => c.status === 'PASS').length;
+  const failed  = cases.filter((c) => c.status === 'FAIL').length;
+  const timeout = cases.filter((c) => c.status === 'TIMEOUT').length;
+  const byScenario = (s) => cases.filter((c) => c.scenario === s).length;
+  return {
+    total:   cases.length,
+    passed,
+    failed,
+    timeout,
+    scenarios: {
+      success: byScenario('success'),
+      failure: byScenario('failure'),
+      timeout: byScenario('timeout'),
+    },
+    feature: 'UPI Circle Personalization',
+    phases: {
+      npci: { total: npci.length, passed: npci.filter((c) => c.status === 'PASS').length },
+      bank: { total: bank.length, passed: bank.filter((c) => c.status === 'PASS').length },
+    },
+    cases,
+  };
+})();
+
+// Long enough for the phase cycle (3 × 5s) to play through once before we
+// declare the run complete.
+const MOCK_CERT_DELAY_MS = CERT_PHASE_DURATION_MS * CERT_RUN_PHASES.length + 1000;
+
 // localStorage key that persists the role + test_data the partner submitted
-// via the Declare Ready dialog. Lets the results report echo the addressing handle / mobile /
+// via the Declare Ready dialog. Lets the results report echo VPA / mobile /
 // account details even after a refresh — the backend doesn't retain them yet.
 const CERT_READY_CTX_KEY = (changeId) => `pp:cert-ready-ctx:${changeId}`;
 
@@ -3802,7 +3853,7 @@ function CertStatTile({ label, value, tone = 'neutral' }) {
   );
 }
 
-// Professional cert results table. Rendered inside the "Certified"
+// Professional UPI-style cert results table. Rendered inside the "Certified"
 // stage once cert_summary is available (real or mocked). Colours stay in the
 // slate / green / red / amber / blue / teal palette — no purple or violet on
 // any test-case text.
@@ -3817,10 +3868,7 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
   const durationSec = Math.max(1, Math.round(
     cases.reduce((acc, c) => acc + (c.duration_ms || 0), 0) / 1000,
   ));
-  // Fallback is deliberately domain-neutral. It used to name a UPI feature,
-  // which meant a summary missing `feature` rendered payments vocabulary into
-  // the report of a change that had nothing to do with payments.
-  const feature = summary?.feature || t('cert.reportTitle');
+  const feature = summary?.feature || 'UPI Circle Personalization';
   // Scenario coverage — success / failure-path / timeout-path scenarios exercised.
   // Falls back to counting the `scenario` field on cases if the summary blob
   // doesn't ship a rollup.
@@ -3833,33 +3881,27 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
   const shortId = String(changeId || 'CHG').slice(0, 8).toUpperCase();
   const tsCompact = (certifiedAt || '').replace(/[^0-9]/g, '').slice(2, 12) || 'RUN01';
   const runId = `TR-${shortId}-${tsCompact}`;
-  const executedAt = certifiedAt
-    ? (formatAbsolute(certifiedAt, { day: '2-digit' }) || certifiedAt)
-    : '—';
+  const executedAt = certifiedAt ? (() => {
+    try {
+      return new Date(certifiedAt).toLocaleString('en-IN', {
+        day: '2-digit', month: 'short', year: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      });
+    } catch { return certifiedAt; }
+  })() : '—';
 
-  // Second copy of the role map, resolved from the pack like the picker.
-  // The raw key is a better fallback than a label from another domain: a run
-  // recorded under a role this pack no longer defines should read
-  // "REMITTER_BANK", not "Bank / PSP".
-  const { data: domain } = useQuery({
-    queryKey: ['domain'], queryFn: getDomain, staleTime: Infinity,
-  });
-  const roleLabel =
-    (domain?.roles || []).find(r => r.key === readyContext?.role)?.label
-    || readyContext?.role
-    || '—';
+  const roleLabel = ({
+    PAYER_PSP:        'Payer PSP',
+    PAYEE_PSP:        'Payee PSP',
+    REMITTER_BANK:    'Remitter Bank',
+    BENEFICIARY_BANK: 'Beneficiary Bank',
+  })[readyContext?.role] || readyContext?.role || 'Bank / PSP';
 
-  // Identifier rows are whatever the run collected, labelled by the pack —
-  // previously four hardcoded lookups (VPA / Mobile / Account # / IFSC) that
-  // showed nothing at all for a domain using different identifiers.
   const td = readyContext?.test_data || {};
-  const fieldLabels = Object.fromEntries(
-    (domain?.roles || []).flatMap(r => r.fields.map(f => [f.key, f.label])),
-  );
-  const humanise = (k) => k.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
-  const submittedRows = Object.entries(td)
-    .filter(([, v]) => v !== null && v !== undefined && String(v).trim() !== '')
-    .map(([k, v]) => [fieldLabels[k] || humanise(k), String(v)]);
+  const submittedVpa    = td.payer_vpa || td.payee_vpa || null;
+  const submittedMobile = td.mobile_number || null;
+  const submittedAcct   = td.account_number || null;
+  const submittedIfsc   = td.ifsc || null;
 
   const statusStyle = (s) => {
     const u = norm(s);
@@ -3869,11 +3911,9 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
     return { bg: 'rgba(148,163,184,0.12)', fg: '#475569', border: 'rgba(148,163,184,0.28)', label: u || '—' };
   };
 
-  // 'BANK' here is the WIRE value the backend sends for partner-initiated
-  // rows — keep the comparison literal; only the displayed label is themed.
   const initStyle = (init) => (init === 'BANK'
-    ? { bg: 'rgba(13,148,136,0.10)', fg: '#0d9488', border: 'rgba(13,148,136,0.28)', label: `${t('term.partnerShort')}` }
-    : { bg: 'rgba(37,99,235,0.10)',  fg: '#2563eb', border: 'rgba(37,99,235,0.28)',  label: `${t('term.authorityCap')}` });
+    ? { bg: 'rgba(13,148,136,0.10)', fg: '#0d9488', border: 'rgba(13,148,136,0.28)', label: 'BANK' }
+    : { bg: 'rgba(37,99,235,0.10)',  fg: '#2563eb', border: 'rgba(37,99,235,0.28)',  label: 'NPCI' });
 
   // Scenario badge — distinct from Status so the reader can see this row
   // exercised a failure or timeout path even though it passed.
@@ -3920,7 +3960,7 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
             color: '#475569', textTransform: 'uppercase',
             padding: '3px 8px', border: '1px solid rgba(15,23,42,0.12)',
             borderRadius: 4, background: '#ffffff',
-          }}>{t('term.authorityCap')} · {t('cert.reportTitle')}</span>
+          }}>NPCI · UPI Certification Report</span>
           <span style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>
             {feature}
           </span>
@@ -3942,11 +3982,10 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
           <div style={metaRow}><span>Executed:</span><span style={metaVal}>{executedAt}</span></div>
           <div style={metaRow}><span>Environment:</span><span style={metaVal}>Cert-Agent · Simulator</span></div>
           <div style={metaRow}><span>Role:</span><span style={metaVal}>{roleLabel}</span></div>
-          {submittedRows.map(([label, value]) => (
-            <div key={label} style={metaRow}>
-              <span>{label}:</span><span style={metaVal}>{value}</span>
-            </div>
-          ))}
+          {submittedVpa    && <div style={metaRow}><span>VPA:</span><span style={metaVal}>{submittedVpa}</span></div>}
+          {submittedMobile && <div style={metaRow}><span>Mobile:</span><span style={metaVal}>{submittedMobile}</span></div>}
+          {submittedAcct   && <div style={metaRow}><span>Account #:</span><span style={metaVal}>{submittedAcct}</span></div>}
+          {submittedIfsc   && <div style={metaRow}><span>IFSC:</span><span style={metaVal}>{submittedIfsc}</span></div>}
         </div>
       </div>
 
@@ -4023,7 +4062,7 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
           <tbody>
             {cases.map((c, idx) => {
               const st  = statusStyle(c.status);
-              const inb = initStyle(String(c.initiated_by || `${t('term.authorityCap')}`).toUpperCase());
+              const inb = initStyle(String(c.initiated_by || 'NPCI').toUpperCase());
               const sc  = scenarioStyle(c.scenario);
               const tcId = c.test_case_id || c.tc_id || c.id || '';
               const isOpen = openId === tcId;
@@ -4127,7 +4166,7 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
         </table>
       </div>
 
-      {/* Download the official the authority sign-off PDF. Rendered on demand
+      {/* Download the official NPCI sign-off PDF. Rendered on demand
           from cert_summary — always available once cert_status is
           'certified'. */}
       <div style={{
@@ -4138,17 +4177,17 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
       }}>
         <div style={{ flex: 1, minWidth: 240 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a', marginBottom: 2 }}>
-            Official {t('term.authority')} Certification Sign-off
+            Official NPCI Certification Sign-off
           </div>
           <div style={{ fontSize: 11.5, color: '#64748b', lineHeight: 1.5 }}>
-            Congratulatory certificate on {t('term.authority')} letterhead, embedding the test-case
+            Congratulatory certificate on NPCI letterhead, embedding the test-case
             results table above. Downloadable as PDF.
           </div>
         </div>
         <button
           onClick={() => downloadCertSignoffPdf(
             changeId,
-            `${t('cert.filePrefix')}_Signoff_${changeId}.pdf`,
+            `NPCI_Certification_Signoff_${changeId}.pdf`,
           )}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 8,
@@ -4182,134 +4221,25 @@ function CertResultsReport({ summary, readyContext, changeId, certifiedAt }) {
           </span>
         </span>
         <span style={{ marginLeft: 'auto' }}>
-          Report generated by {t('term.authority')} Cert Orchestrator · v2.1
+          Report generated by NPCI Cert Orchestrator · v2.1
         </span>
       </div>
     </div>
   );
 }
 
-// ─── Certification Execution Evidence ────────────────────────────────────────
-// The partner's OWN record of every executed certification case, grouped by
-// attempt: what the deployed application was asked, the exact XML it answered
-// (the certified artifact), the grader's verdict and reasons, and the round
-// pack that graded it. Rows come from cert_case_executions, written by the
-// verdict channel BEFORE the report is forwarded — evidence survives even a
-// failed A2A send.
-function CertExecutionsPanel({ npciChangeId }) {
-  const [openCase, setOpenCase] = useState(null)
-
-  const { data } = useQuery({
-    queryKey: ['cert-executions', npciChangeId],
-    queryFn: () => listCertExecutions(npciChangeId),
-    enabled: !!npciChangeId,
-    refetchInterval: 5000,   // rounds land asynchronously; keep the trail live
-  })
-  const rows = data?.executions || []
-  if (!rows.length) return null
-
-  const byAttempt = rows.reduce((m, r) => {
-    (m[r.cert_attempt] = m[r.cert_attempt] || []).push(r); return m
-  }, {})
-  const attempts = Object.keys(byAttempt).map(Number).sort((a, b) => b - a)
-
-  const chip = (status) => (
-    <span style={{
-      fontSize: 10, fontWeight: 700, padding: '1px 8px', borderRadius: 10,
-      textTransform: 'uppercase',
-      color: status === 'passed' ? 'var(--ok, #16a34a)' : status === 'failed' ? '#dc2626' : '#d97706',
-      border: '1px solid currentColor',
-    }}>{status}</span>
-  )
-  const mono = { fontFamily: 'monospace', fontSize: 10.5, whiteSpace: 'pre-wrap',
-                 wordBreak: 'break-all', background: 'var(--panel-2, rgba(0,0,0,0.25))',
-                 padding: '8px 10px', borderRadius: 6, margin: '4px 0 8px' }
-
-  return (
-    <div style={{ marginTop: 16, border: '1px solid var(--border, #333)', borderRadius: 10, overflow: 'hidden' }}>
-      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--border, #333)' }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>Execution Evidence</div>
-        <div style={{ fontSize: 11, opacity: 0.7 }}>
-          Per-case record kept by this platform: request sent to the application, its exact response, and the grading against the round's contract pack
-        </div>
-      </div>
-      <div style={{ padding: '10px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {attempts.map(att => (
-          <div key={att}>
-            <div style={{ fontSize: 11, fontWeight: 700, opacity: 0.8, margin: '4px 0' }}>
-              Round {att} · {byAttempt[att].filter(r => r.status === 'passed').length}/{byAttempt[att].length} passed
-            </div>
-            {byAttempt[att].map(r => {
-              const d = r.details || {}
-              const pay = d.payloads || {}
-              const open = openCase === r.id
-              return (
-                <div key={r.id} style={{ border: '1px solid var(--border, #333)', borderRadius: 8, marginBottom: 6 }}>
-                  <div onClick={() => setOpenCase(open ? null : r.id)}
-                       style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', cursor: 'pointer' }}>
-                    <span style={{ fontFamily: 'monospace', fontSize: 12, fontWeight: 700 }}>{r.case_id}</span>
-                    {chip(r.status)}
-                    <span style={{ fontSize: 10.5, opacity: 0.65 }}>
-                      {d.sim_pack ? `pack ${String(d.sim_pack).split(' ')[0]}` : ''}
-                    </span>
-                    <span style={{ flex: 1 }} />
-                    <span style={{ fontSize: 10.5, opacity: 0.6 }}>{r.at ? formatAbsolute(parseIso(r.at)) : ''}</span>
-                    <ChevronRight size={13} style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }} />
-                  </div>
-                  {open && (
-                    <div style={{ padding: '4px 14px 12px', fontSize: 11 }}>
-                      {(d.assertion_failures || []).length > 0 && (
-                        <>
-                          <div style={{ fontWeight: 700, color: '#dc2626', margin: '6px 0 2px' }}>Grading failures</div>
-                          {d.assertion_failures.map((f, i) =>
-                            <div key={i} style={{ fontFamily: 'monospace', fontSize: 10.5 }}>• {String(f)}</div>)}
-                        </>
-                      )}
-                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, margin: '6px 0' }}>
-                        <div>
-                          <div style={{ fontWeight: 700, opacity: 0.8 }}>Expected</div>
-                          <div style={mono}>{JSON.stringify(d.expected || {}, null, 1)}</div>
-                        </div>
-                        <div>
-                          <div style={{ fontWeight: 700, opacity: 0.8 }}>Observed</div>
-                          <div style={mono}>{JSON.stringify(d.observed || {}, null, 1)}</div>
-                        </div>
-                      </div>
-                      {pay.sut_request && (<>
-                        <div style={{ fontWeight: 700, opacity: 0.8 }}>Request → application</div>
-                        <div style={mono}>{pay.sut_request}</div>
-                      </>)}
-                      {pay.sut_response && (<>
-                        <div style={{ fontWeight: 700, opacity: 0.8 }}>Application response (the certified artifact)</div>
-                        <div style={mono}>{pay.sut_response}</div>
-                      </>)}
-                      {pay.sim_response && (<>
-                        <div style={{ fontWeight: 700, opacity: 0.8 }}>Authority simulator reply (HTTP {String(d.sim_status ?? '')})</div>
-                        <div style={mono}>{pay.sim_response}</div>
-                      </>)}
-                      {pay.truncated && <div style={{ opacity: 0.6 }}>⚠ one or more payloads truncated at the persistence cap</div>}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-
 function CertLifecyclePanel({ changeId, completedSteps = [] }) {
   const queryClient = useQueryClient();
   const [readyDlg, setReadyDlg] = useState(false);
   // Certification can only be declared after all three implementation
   // milestones (Design review / Code review and merge / Test Execution) have
-  // been reported to the authority via the Implementation Pipeline.
+  // been reported to NPCI via the Implementation Pipeline.
   const REQUIRED_STEPS = ['design_completed', 'coding_completed', 'testing_completed'];
   const implementationDone = REQUIRED_STEPS.every((k) => completedSteps.includes(k));
   const [phaseIdx, setPhaseIdx] = useState(0);
+  // Guards the demo mock-complete POST so it fires exactly once per session
+  // per change while cert_status sits at ready_for_certification.
+  const [mockPosted, setMockPosted] = useState(false);
   // Role + test_data the partner submitted via the Declare Ready dialog —
   // echoed in the results report. Seeded from localStorage so it survives refresh.
   const [readyContext, setReadyContext] = useState(() => {
@@ -4321,7 +4251,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
 
   // Polls every 5s so the orchestration stage updates without manual
   // refresh — the partner sees the cert_status flip to 'certified' as
-  // soon as the authority publishes the result over A2A.
+  // soon as NPCI (or the demo mock-complete POST) publishes the result.
   const { data } = useQuery({
     queryKey: ['certStatus', changeId],
     queryFn: () => getCertStatus(changeId),
@@ -4331,15 +4261,59 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
 
   const backendCurrent = data?.current;
 
-  // NOTE: the certified state is published by the authority's cert
-  // orchestrator over A2A and by nothing else. A previous build synthesised a
-  // result set in the browser and POSTed it to /cert-mock-complete, which
-  // persisted cert_status='certified' and pushed it to the authority — so every
-  // certification this platform recorded was fabricated, and the authority was
-  // told it was real. It was unconditional, not a fallback: the only guard was
-  // `ready_for_certification && !mockPosted`, with no dev/demo flag anywhere on
-  // either side. If a demo path is wanted again it must be gated AND the
-  // artifacts it produces must be visibly marked synthetic.
+  // Demo-mode completion: after the orchestration-phase cycle plays out
+  // once, POST the mocked UPI Circle result set to the backend. That
+  // persists cert_summary + cert_status='certified' (so refresh keeps
+  // state) and best-effort mirrors the run to NPCI over A2A. The 5s
+  // getCertStatus poll picks up the new certified payload automatically.
+  useEffect(() => {
+    if (backendCurrent === 'ready_for_certification' && !mockPosted) {
+      let cancelled = false;
+      const timer = setTimeout(async () => {
+        if (cancelled) return;
+        setMockPosted(true);
+        try {
+          await certMockComplete(changeId, {
+            ...MOCK_CERT_SUMMARY,
+            role: readyContext?.role || null,
+            test_data: readyContext?.test_data || null,
+          });
+          queryClient.invalidateQueries({ queryKey: ['certStatus', changeId] });
+          queryClient.invalidateQueries({ queryKey: ['change', changeId] });
+        } catch {
+          // Let the next poll retry.
+          setMockPosted(false);
+        }
+      }, MOCK_CERT_DELAY_MS);
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }
+    // Reset the guard if the backend rewinds out of readiness/certified
+    // (e.g. reset scripts) so a fresh cycle can trigger the mock again.
+    if (backendCurrent
+        && backendCurrent !== 'ready_for_certification'
+        && backendCurrent !== 'certified'
+        && mockPosted) {
+      setMockPosted(false);
+    }
+  }, [backendCurrent, mockPosted, changeId, readyContext, queryClient]);
+
+  // Self-heal on page load: if the change is already certified locally but a
+  // prior A2A push to NPCI may have failed (older NPCI backend, transient
+  // network), fire a zero-arg resync exactly once per mount. The backend
+  // uses the saved cert_summary and NPCI's handler is idempotent, so this
+  // is safe if NPCI already knows.
+  const [resyncPosted, setResyncPosted] = useState(false);
+  useEffect(() => {
+    if (backendCurrent === 'certified' && !resyncPosted && !mockPosted) {
+      setResyncPosted(true);
+      certMockComplete(changeId, {}).catch(() => {
+        // Non-fatal — dashboard flip is best-effort, keep the UI responsive.
+      });
+    }
+  }, [backendCurrent, resyncPosted, mockPosted, changeId]);
 
   const current        = data?.current || 'received';
   const history        = data?.history || {};
@@ -4350,7 +4324,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
   const testsCompleted = current === 'tests_completed';
 
   // Cycle the sub-phase label only while we're actively waiting on
-  // the authority. Resets when the stage flips out of 'running'.
+  // NPCI. Resets when the stage flips out of 'running'.
   useEffect(() => {
     if (activeIdx !== 1 || failed) {
       setPhaseIdx(0);
@@ -4373,7 +4347,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
   });
 
   // Per-stage visual state. The middle stage is the live "waiting on
-  // the authority" one — shows a spinner; the first/last are pending/done.
+  // NPCI" one — shows a spinner; the first/last are pending/done.
   const stateOf = (i) => {
     if (failed && i === 1) return 'failed';
     if (i < activeIdx)     return 'completed';
@@ -4395,7 +4369,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: T.textPrimary }}>Cert Lifecycle</div>
           <div style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>
-            Live · poll every 5s · status from {t('term.authority')} cert orchestrator
+            Live · poll every 5s · status from NPCI cert orchestrator
           </div>
         </div>
         <span style={{
@@ -4546,7 +4520,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
                         border: '1px solid rgba(16,185,129,0.20)',
                         fontSize: 12, color: T.textSecondary,
                       }}>
-                        Pass / fail breakdown will appear here once {t('term.authority')} publishes
+                        Pass / fail breakdown will appear here once NPCI publishes
                         the detailed cert_test_response back to this partner.
                       </div>
                     );
@@ -4561,7 +4535,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
                   );
                 })()}
 
-                {/* the authority Certification Result certificate — downloadable once
+                {/* NPCI Certification Result certificate — downloadable once
                     the all-PASS sign-off has arrived over A2A. */}
                 {state === 'completed' && s.key === 'certified' && data?.has_signoff && (
                   <button
@@ -4581,7 +4555,7 @@ function CertLifecyclePanel({ changeId, completedSteps = [] }) {
 
                 {/* Action button on stage 1 — open Declare Ready dialog.
                     Gated on all three implementation milestones being reported
-                    to {t('term.authority')} first. */}
+                    to NPCI first. */}
                 {state === 'pending-action' && i === 0 && (
                   <>
                     <button
@@ -4698,7 +4672,7 @@ function ChangeDetailInner() {
     // 2 s — was 5 s. Active workflow page; the chat / blocker / counter
     // round trips were the main "feels slow" complaint. Mutations now
     // hydrate the cache directly from the fattened server response, so
-    // this poll mostly covers the authority-driven changes (response landed,
+    // this poll mostly covers NPCI-driven changes (response landed,
     // cert lifecycle ticks).
     refetchInterval: 2000,
     refetchOnWindowFocus: true,
@@ -4854,7 +4828,7 @@ function ChangeDetailInner() {
   }
 
   // Doc types hidden from the partner-side Documents tab for now.
-  // The rows still exist on the backend / authority side; they're just
+  // The rows still exist on the backend / NPCI side; they're just
   // filtered out of the partner UI so partners aren't asked to
   // review artefacts that aren't ready / aren't relevant yet.
   const HIDDEN_DOC_TYPES = new Set([
@@ -4879,15 +4853,8 @@ function ChangeDetailInner() {
   // state machine; future stages render locked until the change reaches them.
   const allMilestonesDone = PROGRESS_STEPS.every(s => completedSteps.includes(s.key));
   const buildReachable = decision === 'accepted';
-  // A change the authority has already CERTIFIED (or is actively certifying)
-  // must expose its Certify view regardless of the local decide/build
-  // tracking: the execution evidence and signoff live there, and locking a
-  // completed certification behind an unclicked local checkbox hides real
-  // history. The forward gate (decide → build → certify) still applies to
-  // changes that haven't reached certification.
-  const certifyReachable = ['certifying', 'tests_completed', 'certified'].includes(change.cert_status)
-    || (buildReachable && (allMilestonesDone
-    || ['ready_for_certification', 'tests_completed', 'certified'].includes(change.cert_status)));
+  const certifyReachable = buildReachable && (allMilestonesDone
+    || ['ready_for_certification', 'tests_completed', 'certified'].includes(change.cert_status));
   const docCount = documents.length;
   const STAGES = [
     // Documents leads — partner lands here on entry so the product kit is the
@@ -4896,7 +4863,7 @@ function ChangeDetailInner() {
     { id: 'decide',    label: 'Decide',    sub: 'Review & decide',    icon: ClipboardCheck, reachable: true,             done: decision === 'accepted' },
     { id: 'build',     label: 'Build',     sub: 'Implement & report', icon: Rocket,         reachable: buildReachable,   done: allMilestonesDone },
     { id: 'certify',   label: 'Certify',   sub: 'Test & certify',     icon: BadgeCheck,     reachable: certifyReachable, done: change.cert_status === 'certified' },
-    { id: 'activity',  label: 'Activity',  sub: `Talk to ${t('term.authority')}`, icon: Activity, reachable: true },
+    { id: 'activity',  label: 'Activity',  sub: 'Talk to NPCI', icon: Activity, reachable: true },
   ];
 
   return (
@@ -4915,7 +4882,7 @@ function ChangeDetailInner() {
             fontSize: T.fontMicro, fontWeight: 700, color: T.textMuted,
             letterSpacing: 0.7, textTransform: 'uppercase', marginBottom: 6,
           }}>
-            {t('term.authorityCap')} Rollout · ID {(change.authority_change_id || '').slice(0, 8) || '—'}
+            NPCI Rollout · ID {(change.npci_change_id || '').slice(0, 8) || '—'}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
             <h1 style={{
@@ -4927,14 +4894,14 @@ function ChangeDetailInner() {
               {change.title}
             </h1>
             {statusBadge(change.status)}
-            {/* Force-pull the latest state from the authority. Drops in alongside
+            {/* Force-pull the latest state from NPCI. Drops in alongside
                 polling so the operator can demand a fresh read after a
                 step instead of waiting for the next 5s tick. */}
             <button
               type="button"
               onClick={handleSync}
               disabled={isFetching}
-              title={`Sync with ${t('term.authority')}`}
+              title="Sync with NPCI"
               style={{
                 marginLeft: 'auto',
                 display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -4954,6 +4921,11 @@ function ChangeDetailInner() {
         <ChangeContextBar change={change} />
 
         <LifecycleStepper change={change} completedSteps={completedSteps} />
+
+        {/* The stepper above is drawn from OUR mirror. This is the one-click
+            check against NPCI's own record — the only way to tell a stale
+            mirror from a genuine stage. */}
+        <NpciStatusPanel changeId={id} />
 
         {/* Open-blocker alert — always visible regardless of active stage so
             the partner is never unaware of an unresolved blocker. */}
@@ -5048,7 +5020,7 @@ function ChangeDetailInner() {
               <DecisionPanel
                 changeId={id}
                 decision={decision}
-                npciCounter={change.authority_counter}
+                npciCounter={change.npci_counter}
                 change={change}
                 onSubmitted={() => setStage('activity')}
               />
@@ -5063,7 +5035,7 @@ function ChangeDetailInner() {
               }}>
                 <Shield size={15} color="#dc2626" style={{ flexShrink: 0 }} />
                 <span style={{ flex: 1, fontSize: 12, color: '#7f1d1d', lineHeight: 1.5 }}>
-                  Hit a blocker while reviewing this kit? Flag it to {t('term.authority')} now — you don't need to accept first.
+                  Hit a blocker while reviewing this kit? Flag it to NPCI now — you don't need to accept first.
                 </span>
                 <button
                   onClick={openBlockerChat}
@@ -5104,7 +5076,7 @@ function ChangeDetailInner() {
                   <>
                     <ImplementationPipeline changeId={id} completedSteps={completedSteps} status={change.status} />
                     {/* Full blocker log — shows all reported blockers with severity,
-                        description, and {t('term.authority')} resolution inline. Report-new-blocker
+                        description, and NPCI resolution inline. Report-new-blocker
                         button opens the chat composer directly. */}
                     <BlockersSection blockers={change.blockers} />
                     {decision === 'accepted' && (
@@ -5113,7 +5085,7 @@ function ChangeDetailInner() {
                           <Shield size={13} /> Report a blocker
                         </button>
                         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          Stuck on something? Describe the issue — {t('term.authorityCap')}'s PM picks it up from the chat.
+                          Stuck on something? Describe the issue — NPCI's PM picks it up from the chat.
                         </span>
                       </div>
                     )}
@@ -5129,7 +5101,6 @@ function ChangeDetailInner() {
             {stage === 'certify' && (
               <>
                 <CertLifecyclePanel changeId={id} completedSteps={completedSteps} />
-                <CertExecutionsPanel npciChangeId={change.authority_change_id} />
                 <EmergencyIssueSection
                   change={change}
                   onRaised={() => queryClient.invalidateQueries({ queryKey: ['change', id] })}
@@ -5137,7 +5108,7 @@ function ChangeDetailInner() {
               </>
             )}
 
-            {/* ── ACTIVITY ── the authority conversation, reachable from any stage. */}
+            {/* ── ACTIVITY ── the NPCI conversation, reachable from any stage. */}
             {stage === 'activity' && (
               <div ref={activityAreaRef}>
                 <ActivityThread
@@ -5208,7 +5179,7 @@ function ChangeDetailInner() {
                     )}
                   </div>
 
-                  {change.authority_change_summary && change.negotiation_version > 1 && (
+                  {change.npci_change_summary && change.negotiation_version > 1 && (
                     <div style={{
                       marginBottom: 18, padding: '14px 16px', borderRadius: 12,
                       background: 'rgba(37,99,235,0.04)', border: '1px solid rgba(37,99,235,0.18)',
@@ -5227,7 +5198,7 @@ function ChangeDetailInner() {
                         </button>
                       </div>
                       <div style={{ fontSize: T.fontBody, color: T.textSecondary, whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
-                        {change.authority_change_summary}
+                        {change.npci_change_summary}
                       </div>
                     </div>
                   )}

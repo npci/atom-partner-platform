@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Security reviewer agent — the second lens in the review step.
 
 Reviews the generated whole-file change set for security defects: injection,

@@ -1,8 +1,4 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 import { useState, useEffect, useRef } from 'react';
-import { t } from '../strings'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Eye, EyeOff, Wifi, Save, Shield, Lock, Sparkles, GitBranch, FileText, Upload } from 'lucide-react';
 import { getSettings, updateSettings, testConnection, getProfile, updateProfile } from '../services/api';
@@ -11,22 +7,12 @@ import { formatDateTime } from '../lib/datetime';
 
 // Flat `key: value` frontmatter reader — mirrors the backend's parser so an
 // uploaded .md's `partner` / `profile_version` populate the structured fields.
-// Frontmatter is a short header — `partner` and `profile_version` are the only
-// keys read. The content comes from an operator-uploaded .md whose size this
-// function does not control, so the line count is untrusted input. The loop
-// counts against this build-time constant and uses the tainted length only as a
-// `break` guard, keeping any unchecked value out of the loop condition.
-const MAX_FRONTMATTER_LINES = 200;
-
 function parseFrontmatter(raw) {
   if (!raw.startsWith('---')) return {};
   const end = raw.indexOf('\n---', 3);
   if (end < 0) return {};
   const out = {};
-  const lines = raw.slice(3, end).trim().split('\n');
-  for (let n = 0; n < MAX_FRONTMATTER_LINES; n += 1) {
-    if (n >= lines.length) break;
-    const line = lines[n];
+  for (const line of raw.slice(3, end).trim().split('\n')) {
     const i = line.indexOf(':');
     if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
   }
@@ -38,7 +24,7 @@ export default function Settings() {
   // Which settings section is shown — replaces the long single-scroll stack.
   const [section, setSection] = useState('connection');
   const [npciUrl, setNpciUrl] = useState('');
-  // Direct service URL used by the A2A SDK for partner -> authority outbound
+  // Direct service URL used by the A2A SDK for partner -> NPCI outbound
   // (distinct from npciUrl, which the UI uses for the test-connection
   // button). Defaults to the docker service name when blank; operators
   // running on a host need to set this explicitly.
@@ -46,17 +32,13 @@ export default function Settings() {
   const [apiKey, setApiKey] = useState('');
   const [partnerName, setPartnerName] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
-  const [openaiKey, setOpenaiKey] = useState('');
-  const [ainxtKey, setAinxtKey] = useState('');
-  // A2A security hardening: the two long-lived authority-issued
+  // Slice 3 / 5 of A2A security hardening — the two long-lived NPCI
   // secrets that gate inbound A2A calls. Held in component state in
   // plaintext while the operator is pasting/editing; cleared on save.
   const [npciJwtSecret, setNpciJwtSecret] = useState('');
   const [npciHmacSecret, setNpciHmacSecret] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [showAnthropicKey, setShowAnthropicKey] = useState(false);
-  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
-  const [showAinxtKey, setShowAinxtKey] = useState(false);
   const [showJwtSecret, setShowJwtSecret] = useState(false);
   const [showHmacSecret, setShowHmacSecret] = useState(false);
   const [toast, setToast] = useState(null);
@@ -83,13 +65,11 @@ export default function Settings() {
 
   useEffect(() => {
     if (settings) {
-      setNpciUrl(settings.authority_platform_url || '');
-      setNpciA2aUrl(settings.authority_a2a_url || '');
+      setNpciUrl(settings.npci_platform_url || '');
+      setNpciA2aUrl(settings.npci_a2a_url || '');
       setApiKey('');  // Don't pre-fill masked value — leave empty unless user wants to change
       setPartnerName(settings.partner_name || '');
       setAnthropicKey('');
-      setOpenaiKey('');
-      setAinxtKey('');
       setNpciJwtSecret('');
       setNpciHmacSecret('');
     }
@@ -111,15 +91,13 @@ export default function Settings() {
 
   const saveMutation = useMutation({
     mutationFn: () => updateSettings({
-      authority_platform_url: npciUrl,
-      authority_a2a_url: npciA2aUrl,
+      npci_platform_url: npciUrl,
+      npci_a2a_url: npciA2aUrl,
       partner_api_key: apiKey,
       partner_name: partnerName,
       partner_anthropic_api_key: anthropicKey,
-      partner_openai_api_key: openaiKey,
-      partner_ainxt_api_key: ainxtKey,
-      authority_jwt_secret: npciJwtSecret,
-      authority_hmac_secret: npciHmacSecret,
+      npci_jwt_secret: npciJwtSecret,
+      npci_hmac_secret: npciHmacSecret,
     }),
     onSuccess: () => {
       showToast('Settings saved');
@@ -179,32 +157,24 @@ export default function Settings() {
 
   if (isLoading) return <div className="page" style={{ maxWidth: 1100 }}><div className="loading">Loading settings...</div></div>;
 
-  // AI readiness reflects whichever provider LLM_PROVIDER selects. `has_llm_api_key`
-  // is the current field; fall back to the legacy Anthropic-only flag so this page
-  // still works against a backend that predates it.
-  const llmReady = settings?.has_llm_api_key ?? !!settings?.has_anthropic_api_key;
-  const llmProvider = settings?.llm_provider === 'claude'
-    ? 'anthropic'
-    : (settings?.llm_provider ?? 'anthropic');
-
   const checks = [
-    !!settings?.authority_platform_url,
+    !!settings?.npci_platform_url,
     !!settings?.has_api_key,
-    llmReady,
-    !!settings?.has_authority_jwt_secret,
-    !!settings?.has_authority_hmac_secret,
+    !!settings?.has_anthropic_api_key,
+    !!settings?.has_npci_jwt_secret,
+    !!settings?.has_npci_hmac_secret,
   ];
   const configuredCount = checks.filter(Boolean).length;
   const totalCount = checks.length;
 
   // Section nav model. `ok` drives the status dot; null = managed elsewhere
   // (Code Repository keeps its own state in CodeRepoSettings).
-  const connectionOk = !!settings?.authority_platform_url && !!settings?.has_api_key;
-  const aiOk = llmReady;
-  const securityOk = !!(settings?.has_authority_jwt_secret && settings?.has_authority_hmac_secret);
+  const connectionOk = !!settings?.npci_platform_url && !!settings?.has_api_key;
+  const aiOk = !!settings?.has_anthropic_api_key;
+  const securityOk = !!(settings?.has_npci_jwt_secret && settings?.has_npci_hmac_secret);
   const profileOk = !!(profileContent && profileContent.trim());
   const SECTIONS = [
-    { id: 'connection', label: `${t('term.authorityCap')} Connection`, icon: Wifi,      ok: connectionOk },
+    { id: 'connection', label: 'NPCI Connection', icon: Wifi,      ok: connectionOk },
     { id: 'profile',    label: 'Partner Profile', icon: FileText,  ok: profileOk },
     { id: 'ai',         label: 'AI Drafting',     icon: Sparkles,  ok: aiOk },
     { id: 'security',   label: 'A2A Security',    icon: Shield,    ok: securityOk },
@@ -268,37 +238,37 @@ export default function Settings() {
 
       <div className="settings-content">
 
-        {/* ── Authority connection ─────────────────────────────────────────── */}
+        {/* ── NPCI Connection ─────────────────────────────────────── */}
         {section === 'connection' && (
         <section className="card" style={cardStyle}>
           <div style={sectionHeaderStyle}>
             <Wifi size={16} />
-            <h3 style={sectionTitleStyle}>{t('term.authorityCap')} Connection</h3>
+            <h3 style={sectionTitleStyle}>NPCI Connection</h3>
           </div>
           <div style={sectionSubtitleStyle}>
-            Where to reach {t('term.authority')}'s platform and how this partner identifies itself on outbound calls.
+            Where to reach NPCI's platform and how this partner identifies itself on outbound calls.
           </div>
 
           <div className="input-group">
-            <label>{t('term.authorityCap')} Platform URL</label>
+            <label>NPCI Platform URL</label>
             <input
               className="input-field"
-              placeholder={t('ph.authorityUrl')}
+              placeholder="https://npci-platform.example.com"
               value={npciUrl}
               onChange={(e) => setNpciUrl(e.target.value)}
             />
           </div>
 
           <div className="input-group">
-            <label>{t('term.authorityCap')} A2A Service URL</label>
+            <label>NPCI A2A Service URL</label>
             <input
               className="input-field"
-              placeholder="http://authority_backend:8000  (host-mode: http://127.0.0.1:8000)"
+              placeholder="http://npci_backend:8000  (host-mode: http://127.0.0.1:8000)"
               value={npciA2aUrl}
               onChange={(e) => setNpciA2aUrl(e.target.value)}
             />
             <div style={helpTextStyle}>
-              Direct URL the A2A SDK uses for outbound partner&nbsp;&rarr;&nbsp;{t('term.authority')} calls (card discovery + JSON-RPC). Leave blank to use the docker default <code>http://authority_backend:8000</code>; set explicitly when running on a host (e.g. <code>http://127.0.0.1:8000</code>).
+              Direct URL the A2A SDK uses for outbound partner&nbsp;&rarr;&nbsp;NPCI calls (card discovery + JSON-RPC). Leave blank to use the docker default <code>http://npci_backend:8000</code>; set explicitly when running on a host (e.g. <code>http://127.0.0.1:8000</code>).
             </div>
           </div>
 
@@ -325,7 +295,7 @@ export default function Settings() {
             <label>Partner Name</label>
             <input
               className="input-field"
-              placeholder="Your institution's name"
+              placeholder="e.g. SBI, PhonePe, Paytm"
               value={partnerName}
               onChange={(e) => setPartnerName(e.target.value)}
             />
@@ -353,9 +323,9 @@ export default function Settings() {
             <Badge ok={profileOk} />
           </div>
           <div style={sectionSubtitleStyle}>
-            Your organisation's capability brief (PARTNER.md). The feasibility analyser and the
+            Your bank's capability brief (PARTNER.md). The feasibility analyser and the
             design / code / testing agents read this as context when evaluating an
-            incoming {t('term.authority')} change. Upload a <code>.md</code> or edit it inline.
+            incoming NPCI change. Upload a <code>.md</code> or edit it inline.
           </div>
 
           <div style={{ display: 'flex', gap: 12 }}>
@@ -363,7 +333,7 @@ export default function Settings() {
               <label>Partner Name</label>
               <input
                 className="input-field"
-                placeholder="Your institution's name"
+                placeholder="e.g. SBI"
                 value={profilePartnerName}
                 onChange={(e) => { setProfilePartnerName(e.target.value); setProfileSource('edit'); }}
               />
@@ -401,14 +371,14 @@ export default function Settings() {
             <textarea
               className="input-field"
               style={{ minHeight: 360, fontFamily: 'var(--font-mono, monospace)', fontSize: 12, lineHeight: 1.5, resize: 'vertical' }}
-              placeholder={t('ph.profile.stub')}
+              placeholder={'---\npartner: Your Bank\nprofile_version: 1.0\n---\n\n# Partner Profile\n\n## Quick reference\n- UPI roles played: ...'}
               value={profileContent}
               onChange={(e) => { setProfileContent(e.target.value); setProfileSource('edit'); }}
             />
             <div style={helpTextStyle}>
               {profile?.exists === false && (profile?.content
                 ? 'Pre-filled from the mounted seed file — save to make it the active profile.'
-                : 'No profile configured yet — paste or upload your organisation\'s brief.')}
+                : 'No profile configured yet — paste or upload your bank\'s brief.')}
               {profile?.updated_at && (
                 <> Last saved {formatDateTime(profile.updated_at)} · source: {profile.source} · {new Blob([profileContent]).size} bytes</>
               )}
@@ -433,12 +403,10 @@ export default function Settings() {
         <section className="card" style={cardStyle}>
           <div style={sectionHeaderStyle}>
             <h3 style={sectionTitleStyle}>AI Drafting</h3>
-            <Badge ok={llmReady} />
+            <Badge ok={!!settings?.has_anthropic_api_key} />
           </div>
           <div style={sectionSubtitleStyle}>
             Used to auto-generate clarification question drafts from shared documents.
-            {' '}Active provider: <strong>{llmProvider}</strong>.
-            {' '}Configure any provider here; the badge follows the active provider.
           </div>
 
           <div className="input-group">
@@ -456,30 +424,6 @@ export default function Settings() {
               </button>
             </div>
           </div>
-
-          <div className="input-group">
-            <label>OpenAI API Key</label>
-            <div className="input-with-icon">
-              <input className="input-field" type={showOpenaiKey ? 'text' : 'password'}
-                placeholder={settings?.has_openai_api_key ? 'Key configured — enter new key to change' : 'sk-...'}
-                value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
-              <button className="input-icon" onClick={() => setShowOpenaiKey(!showOpenaiKey)}>
-                {showOpenaiKey ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-          </div>
-
-          <div className="input-group">
-            <label>AiNxt API Key</label>
-            <div className="input-with-icon">
-              <input className="input-field" type={showAinxtKey ? 'text' : 'password'}
-                placeholder={settings?.has_ainxt_api_key ? 'Key configured — enter new key to change' : 'Gateway API key'}
-                value={ainxtKey} onChange={(e) => setAinxtKey(e.target.value)} />
-              <button className="input-icon" onClick={() => setShowAinxtKey(!showAinxtKey)}>
-                {showAinxtKey ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
-          </div>
         </section>
         )}
 
@@ -489,26 +433,26 @@ export default function Settings() {
           <div style={sectionHeaderStyle}>
             <Shield size={16} />
             <h3 style={sectionTitleStyle}>A2A Security</h3>
-            <Badge ok={!!(settings?.has_authority_jwt_secret && settings?.has_authority_hmac_secret)} />
+            <Badge ok={!!(settings?.has_npci_jwt_secret && settings?.has_npci_hmac_secret)} />
           </div>
           <div style={sectionSubtitleStyle}>
-            {t('term.authorityCap')}-issued secrets used to validate inbound A2A calls. {t('term.authorityCap')} returns these once at
+            NPCI-issued secrets used to validate inbound A2A calls. NPCI returns these once at
             partner-create or after rotate — paste them here.
           </div>
 
           <div className="input-group">
             <label style={labelRowStyle}>
-              {t('term.authorityCap')} JWT Signing Secret
-              <Badge ok={!!settings?.has_authority_jwt_secret} />
+              NPCI JWT Signing Secret
+              <Badge ok={!!settings?.has_npci_jwt_secret} />
             </label>
             <div className="input-with-icon">
               <input
                 className="input-field"
                 type={showJwtSecret ? 'text' : 'password'}
                 placeholder={
-                  settings?.has_authority_jwt_secret
-                    ? `Configured — current: ${settings.authority_jwt_secret_masked}. Paste new value to rotate.`
-                    : `64-char hex — paste from ${t('term.authority')} rotate-jwt-secret response`
+                  settings?.has_npci_jwt_secret
+                    ? `Configured — current: ${settings.npci_jwt_secret_masked}. Paste new value to rotate.`
+                    : '64-char hex — paste from NPCI rotate-jwt-secret response'
                 }
                 value={npciJwtSecret}
                 onChange={(e) => setNpciJwtSecret(e.target.value)}
@@ -519,23 +463,23 @@ export default function Settings() {
             </div>
             <div style={helpTextStyle}>
               <Lock size={10} style={{ verticalAlign: 'text-bottom', marginRight: 3 }} />
-              Validates the Bearer JWT {t('term.authority')} signs on inbound /a2a-rpc/rpc calls.
+              Validates the Bearer JWT NPCI signs on inbound /a2a-rpc/rpc calls.
             </div>
           </div>
 
           <div className="input-group" style={{ marginTop: 14 }}>
             <label style={labelRowStyle}>
-              {t('term.authorityCap')} HMAC Envelope Secret
-              <Badge ok={!!settings?.has_authority_hmac_secret} />
+              NPCI HMAC Envelope Secret
+              <Badge ok={!!settings?.has_npci_hmac_secret} />
             </label>
             <div className="input-with-icon">
               <input
                 className="input-field"
                 type={showHmacSecret ? 'text' : 'password'}
                 placeholder={
-                  settings?.has_authority_hmac_secret
-                    ? `Configured — current: ${settings.authority_hmac_secret_masked}. Paste new value to rotate.`
-                    : `64-char hex — paste from ${t('term.authority')} rotate-hmac-secret response`
+                  settings?.has_npci_hmac_secret
+                    ? `Configured — current: ${settings.npci_hmac_secret_masked}. Paste new value to rotate.`
+                    : '64-char hex — paste from NPCI rotate-hmac-secret response'
                 }
                 value={npciHmacSecret}
                 onChange={(e) => setNpciHmacSecret(e.target.value)}
@@ -546,7 +490,7 @@ export default function Settings() {
             </div>
             <div style={helpTextStyle}>
               <Lock size={10} style={{ verticalAlign: 'text-bottom', marginRight: 3 }} />
-              Validates X-{t('term.authority')}-Signature on inbound A2A requests (replay + tamper protection).
+              Validates X-NPCI-Signature on inbound A2A requests (replay + tamper protection).
             </div>
           </div>
         </section>

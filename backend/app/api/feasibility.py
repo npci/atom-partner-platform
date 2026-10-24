@@ -1,12 +1,9 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Feasibility analyser API routes.
 
 Endpoints:
-  GET  /api/feasibility/profile/status         — wiring sanity check
-  POST /api/feasibility/analyse/{change_id}    — run the analyser, persist a new report version
-  GET  /api/feasibility/report/{change_id}     — latest persisted report for this change
+  GET  /api/feasibility/profile/status         — wiring sanity check (Slice 1)
+  POST /api/feasibility/analyse/{change_id}    — run the analyser, persist a new report version (Slice 2)
+  GET  /api/feasibility/report/{change_id}     — latest persisted report for this change (Slice 2)
 """
 import json
 import logging
@@ -18,25 +15,15 @@ from sqlalchemy.orm import Session
 from app.agents import registry
 from app.api.auth import get_current_user
 from app.database import get_db
-from app.core.llm import resolve_runtime_api_key
-from app.models import ChangeDocument, FeasibilityReport, IncomingChange
+from app.models import ChangeDocument, FeasibilityReport, IncomingChange, PartnerSetting
 
 logger = logging.getLogger(__name__)
 
-# Auth is attached at the ROUTER, not per-route (SAST F-003/F-004/F-005).
-# All three endpoints here were unauthenticated while every comparable
-# `api/dashboard/*.py` route required `get_current_user`; `main.py` mounts this
-# router with no dependency of its own, so the gap was total. Router-level means
-# a route added to this file later is covered by default — the per-route spelling
-# is what let the boundary be forgotten in the first place.
-router = APIRouter(
-    prefix="/api/feasibility",
-    tags=["feasibility"],
-    dependencies=[Depends(get_current_user)],
-)
+router = APIRouter(prefix="/api/feasibility", tags=["feasibility"],
+                   dependencies=[Depends(get_current_user)])
 
 
-# ── Wiring sanity check ─────────────────────────────────────────────────────
+# ── Slice 1 — wiring sanity check ───────────────────────────────────────────
 
 
 @router.get("/profile/status")
@@ -65,12 +52,18 @@ def profile_status():
     }
 
 
-# ── Run analyser + fetch report ─────────────────────────────────────────────
+# ── Slice 2 — run analyser + fetch report ───────────────────────────────────
 
 
 def _resolve_runtime_api_key(db: Session) -> str | None:
-    """Resolve the active provider's DB-managed or environment credential."""
-    return resolve_runtime_api_key(db)
+    """Per partner-side convention, the Anthropic key may be pasted into
+    `partner_settings` via the Settings UI rather than baked into the env.
+    When present, the LLM call layer prefers it. Returns None if the
+    setting isn't installed (caller falls back to env)."""
+    row = db.execute(
+        select(PartnerSetting).where(PartnerSetting.key == "partner_anthropic_api_key")
+    ).scalar_one_or_none()
+    return row.value if row and row.value else None
 
 
 @router.post("/analyse/{change_id}")
@@ -81,10 +74,6 @@ def run_analysis(change_id: str, db: Session = Depends(get_db)):
 
     Idempotency: each call creates a NEW version row — re-runs do not
     overwrite prior outputs. Callers wanting "latest" use the GET endpoint.
-
-    Requires an authenticated partner user (router-level dependency): this
-    call spends the partner's configured LLM budget, so leaving it open was a
-    cost/DoS surface as well as a broken-access-control one.
     """
     change = db.execute(
         select(IncomingChange).where(IncomingChange.id == change_id)
@@ -116,7 +105,7 @@ def run_analysis(change_id: str, db: Session = Depends(get_db)):
     ctx = assemble_change_context(db, change_id, api_key)
 
     # Route through the agent registry so the run is audited in `agent_runs`
-    # and respects the manifest binding (in-process today; a partner can repoint
+    # and respects the manifest binding (in-process today; a bank can repoint
     # feasibility at a remote service without changing this endpoint).
     agent_input = {
         "change_title": change.title,

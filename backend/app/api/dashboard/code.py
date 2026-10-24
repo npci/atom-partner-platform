@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Dashboard domain: code — run the partner Code agent against a change to
 author an implementation plan + change skeleton, persist a versioned plan, serve
 it (JSON + .docx download).
@@ -8,12 +5,10 @@ it (JSON + .docx download).
 When a repo is indexed (Code RAG), the plan is repository-grounded — retrieved
 source excerpts are passed to the agent and _meta.grounded=True. With no indexed
 repo it falls back to the spec-grounded skeleton (_meta.grounded=False). MR push
-comes later.
+is the later Phase 3.4.
 """
 import json
 import logging
-import re
-from datetime import datetime, timezone
 from urllib.parse import quote as urlquote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -24,12 +19,10 @@ from sqlalchemy.orm import Session
 from app.agents import registry
 from app.api.auth import get_current_user
 from app.config import settings
-from app.core.domain import get_active_pack
 from app.database import get_db
-from app.core.llm import resolve_runtime_api_key
 from app.models import (
     CodeMergeRequest, CodeRepo, CodeReport, CodeReviewReport, DesignReport,
-    GeneratedCodeFile, IncomingChange, PartnerUser,
+    GeneratedCodeFile, IncomingChange, PartnerSetting, PartnerUser,
 )
 from app.rag.retrieval import build_code_context, build_kb_context
 
@@ -67,7 +60,8 @@ def _code_context(db: Session, change: IncomingChange) -> str:
 
 
 def _runtime_api_key(db: Session) -> str | None:
-    return resolve_runtime_api_key(db)
+    row = db.get(PartnerSetting, "partner_anthropic_api_key")
+    return row.value if row and row.value else None
 
 
 def _latest_design_summary(db: Session, change_id: str) -> str | None:
@@ -85,27 +79,6 @@ def _latest_design_summary(db: Session, change_id: str) -> str | None:
         return None
 
 
-def _latest_design_components_touched(db: Session, change_id: str) -> list[str]:
-    """The latest design report's `components_touched[]` — used to seed the
-    SDLC Gap 2 cross-module symbol-usage check (rag/symbol_usage.py) before
-    code-plan generation. Empty list if there is no design report yet, or if
-    it doesn't carry the field (schema-tolerant — this is an advisory input,
-    never a hard requirement)."""
-    row = db.execute(
-        select(DesignReport)
-        .where(DesignReport.change_id == change_id)
-        .order_by(DesignReport.version.desc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if not row:
-        return []
-    try:
-        components = (json.loads(row.content) or {}).get("components_touched")
-    except (json.JSONDecodeError, TypeError):
-        return []
-    return [c for c in (components or []) if isinstance(c, str) and c.strip()]
-
-
 def _run_code_plan_job(change_id: str, db: Session, progress) -> None:
     """The actual code-plan run — executes inside a background AgentJob."""
     change = db.execute(
@@ -121,23 +94,6 @@ def _run_code_plan_job(change_id: str, db: Session, progress) -> None:
     ctx = assemble_change_context(db, change_id, api_key)
 
     progress("retrieving repository context")
-    repo_for_symbol_check = _latest_indexed_repo(db)
-    code_context = _code_context(db, change)
-
-    # A lightweight cross-module usage check over the design's touched
-    # components, layered on top of the RAG excerpts above — advisory only,
-    # never blocks plan
-    # generation on failure. See rag/symbol_usage.py for why this is a
-    # pragmatic middle ground rather than a full dependency-graph engine.
-    symbol_usage_context = ""
-    if repo_for_symbol_check is not None:
-        progress("checking cross-module symbol usage")
-        components = _latest_design_components_touched(db, change_id)
-        if components:
-            from app.rag.symbol_usage import find_symbol_usages, format_usage_context
-            usage_map = find_symbol_usages(db, repo_for_symbol_check, components)
-            symbol_usage_context = format_usage_context(usage_map)
-
     agent_input = {
         "change_title": change.title,
         "change_initial_prompt": change.initial_prompt,
@@ -146,8 +102,7 @@ def _run_code_plan_job(change_id: str, db: Session, progress) -> None:
         "revision_summary": ctx["revision_summary"],
         "design_summary": _latest_design_summary(db, change_id),
         "knowledge_context": _kb_context(db, change),
-        "code_context": code_context,
-        "symbol_usage_context": symbol_usage_context,
+        "code_context": _code_context(db, change),
         "api_key": api_key,
         "change_id": change_id,
     }
@@ -262,29 +217,14 @@ def download_code_docx(
     )
 
 
-# ── Merge request (Code RAG) ────────────────────────────────────────────────
+# ── Merge request (Code RAG Phase 3.4) ──────────────────────────────────────
 
 
 def _mr_view(row: CodeMergeRequest) -> dict:
-    """Serialise a merge-request row for the dashboard.
-
-    `mr_url` is deliberately NOT included. Static analysis traced it from this
-    response through `getCodeMergeRequest` in api.js into `<a href={...}>` in
-    CodePanel.jsx — one dataflow reported as Client DOM XSS, Reflected XSS and
-    Client DOM Open Redirect. Wrapping the sink in
-    `safeHref()` blocked the attack at runtime but left the source→sink path
-    intact, so the finding returned on each rescan.
-
-    Sending the COMPONENTS instead removes the flow: `project_path` is a
-    charset-validated GitLab namespace and `mr_iid` is an integer, and the
-    browser assembles the link against a build-time base URL
-    (frontend/src/utils/mrUrl.js). No server-supplied URL string reaches an href.
-    """
     return {
         "id": row.id, "change_id": row.change_id, "repo_id": row.repo_id,
         "code_report_version": row.code_report_version, "branch": row.branch,
-        "mr_iid": row.mr_iid, "project_path": row.project_path,
-        "commit_sha": row.commit_sha,
+        "mr_url": row.mr_url, "mr_iid": row.mr_iid, "commit_sha": row.commit_sha,
         "files_count": row.files_count, "status": row.status, "last_error": row.last_error,
         "created_at": row.created_at.isoformat(),
     }
@@ -294,56 +234,6 @@ def _mr_view(row: CodeMergeRequest) -> dict:
 # Files are generated once, persisted as a reviewable artifact (GeneratedCodeFile),
 # then pushed by the MR step. This split is what lets the code-review / security-
 # review loop run over the files before they ever reach GitLab.
-
-def _append_cert_trigger(files: list[dict], change_id: str, db: Session,
-                         progress) -> list[dict]:
-    """I-8 Stage 2: append the generated certification trigger handler.
-
-    Flag-gated (`cert_emit_trigger_handler`, default off), so an existing
-    deployment's generated app is byte-unchanged until an operator opts in.
-    Emitted from a TEMPLATE rather than by the model on purpose: this handler's
-    contract is exact (202 and never a verdict, refuse without the bearer
-    secret, decline an unknown case id), and "the model usually gets it right"
-    is not a certification control.
-
-    NOTE the half of the contract codegen cannot supply: the emitted module
-    exposes `router`, and the generated application must `include_router` it
-    for the path to exist. Mounting lives in model-authored files, so it is
-    neither emitted nor asserted here — the same judgement that leaves
-    `originate_case` unimplemented.
-    """
-    if not settings.cert_emit_trigger_handler:
-        return files
-
-    from app.api.dashboard.certification import case_flows_for_change
-    from app.services.cert_trigger_codegen import emit_trigger_handler
-
-    case_flows = case_flows_for_change(db, change_id)
-    if not case_flows:
-        msg = ("certification trigger NOT emitted — the suite maps no "
-               "bank-initiated case to an outbound flow (no api/flow column?)")
-        logger.warning("%s [change %s]", msg, change_id)
-        progress(msg)
-        return files
-
-    emitted = emit_trigger_handler(case_flows=case_flows, enabled=True)
-    if not emitted:
-        return files
-
-    # The template is deterministic and the model is not. If the LLM happened
-    # to author the same path, the template-emitted file wins outright rather
-    # than both landing and one silently shadowing the other at import time.
-    paths = {f["path"] for f in emitted}
-    kept = [f for f in files if f.get("path") not in paths]
-    if len(kept) != len(files):
-        logger.warning("certification trigger: replaced model-authored %s with "
-                       "the template-emitted handler", ", ".join(sorted(paths)))
-
-    progress(f"emitted certification trigger for {len(case_flows)} case(s)")
-    logger.info("cert trigger codegen: emitted handler for %d case(s) [change %s]",
-                len(case_flows), change_id)
-    return kept + emitted
-
 
 def _generate_files(change_id: str, db: Session, progress) -> list[dict]:
     """Whole-file generation from the latest plan, grounded by retrieved excerpts
@@ -390,7 +280,7 @@ def _generate_files(change_id: str, db: Session, progress) -> list[dict]:
             "file generation produced nothing — check logs (no LLM key, a batch "
             "kept truncating, or the model returned no <<FILE>> blocks)."
         )
-    return _append_cert_trigger(files, change_id, db, progress)
+    return files
 
 
 def _latest_iteration(db: Session, change_id: str) -> int:
@@ -402,18 +292,9 @@ def _latest_iteration(db: Session, change_id: str) -> int:
     ).scalar() or 0
 
 
-def _store_generated_files(
-    db: Session, change_id: str, files: list[dict],
-    *, fixed_finding_refs: list[str] | None = None,
-) -> int:
+def _store_generated_files(db: Session, change_id: str, files: list[dict]) -> int:
     """Persist `files` as a new iteration. Tags each with create|modify from the
-    latest plan's file_changes (informational). Returns the new iteration number.
-
-    `fixed_finding_refs` — the stable ids (see `_stamp_finding_ids`) of the
-    findings this regeneration was fixing. Stamped onto every row created in
-    this call, giving the platform a persisted, queryable audit trail from
-    finding to fix. None/omitted for the initial generation (iteration 1 —
-    nothing to fix yet)."""
+    latest plan's file_changes (informational). Returns the new iteration number."""
     plan_row = _latest_code_row(db, change_id)
     action_by_path = {}
     if plan_row:
@@ -435,7 +316,6 @@ def _store_generated_files(
             content=f.get("content", ""),
             action=action_by_path.get(f["path"]),
             code_report_version=plan_row.version if plan_row else None,
-            fixed_finding_refs=fixed_finding_refs or None,
         ))
     db.commit()
     return iteration
@@ -516,24 +396,6 @@ def _review_status(db: Session, change_id: str) -> dict:
     }
 
 
-def _stamp_finding_ids(out: dict, change_id: str, iteration: int, reviewer: str) -> dict:
-    """Give every finding a stable, deterministic id — a SHA-1 of
-    (change_id, iteration, reviewer, file, title), so the SAME finding
-    reported again (e.g. a re-run of the same iteration) gets the SAME id,
-    while two different findings never collide. This is the durable
-    finding-to-fix audit trail `GeneratedCodeFile.fixed_finding_refs` records
-    against — distinct from `_finding_key()`'s presentation-only heuristic
-    used by the UI's fix-history view, which must remain title-based to
-    tolerate an LLM rewording a finding across iterations."""
-    import hashlib
-    for f in out.get("findings") or []:
-        if not isinstance(f, dict):
-            continue
-        basis = f"{change_id}:{iteration}:{reviewer}:{f.get('file')}:{f.get('title')}"
-        f["id"] = "F-" + hashlib.sha1(basis.encode()).hexdigest()[:12]
-    return out
-
-
 def _review_current_iteration(change_id: str, db: Session, progress) -> dict:
     """Run both reviewer agents over the CURRENT generated-file iteration and
     persist one CodeReviewReport row each (idempotent for the iteration). Returns
@@ -576,7 +438,6 @@ def _review_current_iteration(change_id: str, db: Session, progress) -> dict:
     for agent_name, reviewer in _REVIEWERS:
         progress(f"running {reviewer} review over {len(files)} files")
         out = registry.get(agent_name).execute(agent_input, db=db, change_id=change_id)
-        out = _stamp_finding_ids(out, change_id, iteration, reviewer)
         db.add(CodeReviewReport(
             change_id=change_id,
             iteration=iteration,
@@ -585,141 +446,13 @@ def _review_current_iteration(change_id: str, db: Session, progress) -> dict:
             model_used=(out.get("_meta") or {}).get("model_used"),
         ))
         db.commit()
-
-    # A third, deterministic "reviewer" — a regex-based anti-pattern scan that can
-    # never miss a pattern-matchable defect regardless of what the two LLM
-    # reviewers happen to catch this run. Zero additional LLM cost.
-    # `_review_status()` already sums findings across ALL CodeReviewReport
-    # rows for the iteration regardless of `reviewer` value, so "any finding
-    # blocks" applies uniformly with no further change needed there.
-    progress(f"running deterministic lint scan over {len(files)} files")
-    from app.agents.lint_gate import lint_files
-    lint_result = lint_files(files)
-    lint_result = _stamp_finding_ids(lint_result, change_id, iteration, "lint")
-    db.add(CodeReviewReport(
-        change_id=change_id,
-        iteration=iteration,
-        reviewer="lint",
-        content=json.dumps(lint_result),
-        model_used="deterministic",
-    ))
-    db.commit()
-
     return _review_status(db, change_id)
-
-
-def _check_design_alignment_if_clean(change_id: str, db: Session, progress, st: dict) -> None:
-    """Once a review reaches 'clean' (zero findings), check whether the
-    generated files actually match the implementation plan's stated intent —
-    'clean' only
-    means the code-quality/security/lint lenses found nothing, which is a
-    different claim.
-
-    The result is PERSISTED as a `CodeReviewReport` row with
-    `reviewer="design_alignment"`. It was previously only written to
-    `progress()`, which `jobs.py::_run_job` sets to None the moment the job
-    finishes — so the deviations were computed, an LLM call was paid for, and
-    the output was then erased before any user could read it.
-
-    Persisting it has one hard constraint: `_review_status()` sums
-    `len(content["findings"])` across every reviewer row for the iteration,
-    and any non-zero count flips the change to `issues_found` and blocks the
-    MR. This check is explicitly ADVISORY (see ADR/Tier 3 — a design deviation
-    is a "read this before merging" signal, not a merge blocker), so the row
-    is written with an EMPTY `findings` list and the substance in `summary` +
-    a `deviations` key that the status aggregation does not look at. That
-    keeps it durable and queryable without silently turning an advisory
-    signal into a gate.
-
-    Never raises — a failure here must not fail an otherwise-clean review.
-    """
-    if st.get("status") != "clean":
-        return
-    try:
-        progress("review is clean — checking design alignment")
-        from app.agents.design_alignment import check_alignment
-        plan_row = _latest_code_row(db, change_id)
-        if plan_row is None:
-            return
-        plan = json.loads(plan_row.content)
-        files = _latest_generated_files(db, change_id)
-        alignment = check_alignment(plan.get("plan_markdown", ""), files)
-
-        aligned = alignment.get("aligned")
-        if aligned is None:
-            # The check itself didn't run (no LLM key, provider error). That is
-            # "no signal", not "no deviations" — recording it as the latter
-            # would assert agreement nobody actually verified.
-            return
-
-        deviations = alignment.get("deviations") or []
-        if aligned is False:
-            summary = (
-                f"Design-alignment check found {len(deviations)} deviation(s) "
-                f"from the implementation plan. Advisory — does not block the MR."
-            )
-        else:
-            summary = "Design-alignment check found no deviations from the implementation plan."
-        progress(summary)
-
-        _store_design_alignment(
-            db, change_id,
-            iteration=st.get("reviewed_iteration") or _latest_iteration(db, change_id),
-            aligned=aligned,
-            deviations=deviations,
-            summary=summary,
-        )
-    except Exception:  # noqa: BLE001 — advisory only, must never fail the job
-        logger.warning("design_alignment check errored (non-fatal)", exc_info=True)
-
-
-def _store_design_alignment(
-    db: Session, change_id: str, *, iteration: int, aligned: bool,
-    deviations: list, summary: str,
-) -> None:
-    """Upsert the advisory design-alignment result for `iteration`.
-
-    Upsert rather than insert: a change can be reviewed repeatedly at the same
-    iteration (the manual "Run review" button), and each run should replace the
-    previous verdict rather than stack duplicates the UI would render twice.
-
-    `findings` is deliberately `[]` — see `_check_design_alignment_if_clean`
-    for why a non-empty list here would convert an advisory signal into a
-    merge blocker.
-    """
-    existing = db.execute(
-        select(CodeReviewReport).where(
-            CodeReviewReport.change_id == change_id,
-            CodeReviewReport.iteration == iteration,
-            CodeReviewReport.reviewer == "design_alignment",
-        )
-    ).scalars().first()
-
-    content = json.dumps({
-        "summary": summary,
-        "findings": [],          # MUST stay empty — advisory, not blocking
-        "aligned": aligned,
-        "deviations": deviations,
-    })
-    if existing:
-        existing.content = content
-        existing.generated_at = datetime.now(timezone.utc)
-    else:
-        db.add(CodeReviewReport(
-            change_id=change_id,
-            iteration=iteration,
-            reviewer="design_alignment",
-            content=content,
-            model_used="llm-advisory",
-        ))
-    db.commit()
 
 
 def _run_review_job(change_id: str, db: Session, progress) -> None:
     """Standalone review of the current iteration (the manual 'Run review')."""
     st = _review_current_iteration(change_id, db, progress)
     progress(f"review complete — {st['findings_count']} finding(s) ({st['status']})")
-    _check_design_alignment_if_clean(change_id, db, progress, st)
 
 
 def _reviewed_findings(db: Session, change_id: str, iteration: int) -> list[dict]:
@@ -738,10 +471,8 @@ def _reviewed_findings(db: Session, change_id: str, iteration: int) -> list[dict
 
 
 def _iteration_findings_by_reviewer(db: Session, change_id: str, iteration: int) -> dict:
-    """{reviewer: [findings]} for one reviewed iteration — the two LLM lenses
-    plus the deterministic lint gate (SDLC Gap 3), which shares the same
-    findings storage/aggregation."""
-    out: dict[str, list] = {"code_quality": [], "security": [], "lint": []}
+    """{reviewer: [findings]} for one reviewed iteration (both lenses)."""
+    out: dict[str, list] = {"code_quality": [], "security": []}
     rows = db.execute(
         select(CodeReviewReport)
         .where(CodeReviewReport.change_id == change_id, CodeReviewReport.iteration == iteration)
@@ -784,7 +515,7 @@ def _review_history(db: Session, change_id: str) -> list[dict]:
         cur = per[it]
         nxt = per[iters[idx + 1]] if idx + 1 < len(iters) else None
         entry = {"iteration": it, "reviews": {}, "fixed": {}}
-        for lens in ("code_quality", "security", "lint"):
+        for lens in ("code_quality", "security"):
             cur_f = cur.get(lens, [])
             entry["reviews"][lens] = cur_f
             if nxt is not None:
@@ -826,25 +557,10 @@ def _run_fix_job(change_id: str, db: Session, progress) -> None:
     max_rounds = max(1, settings.code_review_max_fix_rounds)
 
     rounds = 0
-    # The loop previously had no cumulative-improvement invariant — it would
-    # burn every round in `max_rounds` even if a "fix" made zero net progress (or
-    # oscillated: fix A breaks B, fix B breaks A, count stays flat). Tracking
-    # the finding count across rounds lets the loop stop itself the moment a
-    # round fails to make progress, instead of always running to the cap.
-    prev_findings_count: int | None = None
     while rounds < max_rounds:
         st = _review_status(db, change_id)
         if st["status"] != "issues_found":
             break  # converged → clean
-
-        if prev_findings_count is not None and st["findings_count"] >= prev_findings_count:
-            progress(
-                f"round {rounds}: finding count did not decrease "
-                f"({prev_findings_count} -> {st['findings_count']}) — "
-                f"possible oscillation, stopping auto-fix for manual review"
-            )
-            break
-        prev_findings_count = st["findings_count"]
 
         files = _latest_generated_files(db, change_id)
         findings = _reviewed_findings(db, change_id, st["reviewed_iteration"])
@@ -868,12 +584,7 @@ def _run_fix_job(change_id: str, db: Session, progress) -> None:
         )
         if not new_files:
             raise RuntimeError(f"auto-fix failed during round {rounds} — check logs")
-        # Stamp the ids of the findings THIS round was fixing onto the new
-        # iteration's rows — the persisted, queryable finding-to-fix audit trail.
-        fixed_finding_ids = [f.get("id") for f in findings if f.get("id")]
-        new_iteration = _store_generated_files(
-            db, change_id, new_files, fixed_finding_refs=fixed_finding_ids,
-        )
+        new_iteration = _store_generated_files(db, change_id, new_files)
 
         progress(f"round {rounds}/{max_rounds}: reviewing iteration {new_iteration}")
         _review_current_iteration(change_id, db, progress)
@@ -886,7 +597,6 @@ def _run_fix_job(change_id: str, db: Session, progress) -> None:
             f"auto-fix stopped after {rounds} round(s) — {final['findings_count']} finding(s) "
             f"remain (round cap {max_rounds}); re-run or edit manually"
         )
-    _check_design_alignment_if_clean(change_id, db, progress, final)
 
 
 def _run_mr_job(change_id: str, db: Session, progress) -> None:
@@ -916,22 +626,11 @@ def _run_mr_job(change_id: str, db: Session, progress) -> None:
     else:
         progress(f"pushing stored iteration {_latest_iteration(db, change_id)} ({len(files)} files)")
 
-    # Branch name and MR text are the ONLY artifacts this platform writes into
-    # somebody else's repository, so they are the last place a hardcoded brand
-    # should survive. They were `npci-change-*` / "feat: NPCI change ...", which
-    # meant a library or telecom deployment opened merge requests naming a
-    # payments authority in its own codebase, permanently, in git history.
-    #
-    # Slugged to `[a-z0-9-]`: `authority_short` is operator-supplied pack config
-    # and reaches a git ref, where a space or `..` or a leading `-` is either
-    # rejected by git or an argument-injection risk at the CLI boundary.
-    _short = get_active_pack().signoff.authority_short
-    _slug = re.sub(r"[^a-z0-9]+", "-", _short.lower()).strip("-") or "authority"
-    branch = f"{_slug}-change-{change_id[:8]}"
-    title = f"feat: {_short} change {change_id[:8]} — {(change.title or '')[:60]}"
+    branch = f"npci-change-{change_id[:8]}"
+    title = f"feat: NPCI change {change_id[:8]} — {(change.title or '')[:60]}"
     grounded = plan.get("_meta", {}).get("grounded") is True
     description = (
-        f"## {_short} change `{change_id}`\n\n"
+        f"## NPCI change `{change_id}`\n\n"
         f"AI-generated by the partner platform from the implementation plan "
         f"(v{plan_row.version}, {'repository-grounded' if grounded else 'spec-grounded'}). "
         f"**Review before merging** — this is a starting point, not a vetted change.\n\n"
@@ -948,19 +647,14 @@ def _run_mr_job(change_id: str, db: Session, progress) -> None:
             db, repo, branch_name=branch, files=files, title=title, description=description,
         )
     except Exception as exc:  # noqa: BLE001 — record the failure for the UI
-        from app.core.errors import safe_exc, user_facing_error
-        logger.exception("open MR failed: repo=%s branch=%s", getattr(repo, "id", None), branch)
         row.status = "error"
-        # `last_error` is rendered by the UI (see the repo list view), so it
-        # gets the sanitised form; the trace above keeps the real detail.
-        row.last_error = user_facing_error(exc)
+        row.last_error = str(exc)[:500]
         db.add(row)
         db.commit()
-        raise RuntimeError(f"merge request failed: {safe_exc(exc)}")
+        raise RuntimeError(f"merge request failed: {exc}")
 
     row.mr_url = result["mr_url"]
     row.mr_iid = result["mr_iid"]
-    row.project_path = result["project_path"]
     row.commit_sha = result["commit_sha"]
     row.status = "opened"
     db.add(row)
@@ -1118,22 +812,13 @@ def get_code_review(
                 content = json.loads(r.content) or {}
             except (json.JSONDecodeError, TypeError):
                 content = {"summary": "(unreadable)", "findings": []}
-            entry = {
+            reviews.append({
                 "reviewer": r.reviewer,
                 "model_used": r.model_used,
                 "generated_at": r.generated_at.isoformat() if r.generated_at else None,
                 "summary": content.get("summary"),
                 "findings": content.get("findings") or [],
-            }
-            # The advisory design-alignment lens carries its substance outside
-            # `findings` (which must stay empty so it cannot block the MR — see
-            # `_check_design_alignment_if_clean`), so surface those keys
-            # explicitly or the UI would render an empty, meaningless row.
-            if r.reviewer == "design_alignment":
-                entry["aligned"] = content.get("aligned")
-                entry["deviations"] = content.get("deviations") or []
-                entry["advisory"] = True
-            reviews.append(entry)
+            })
     return {"change_id": change_id, **st, "reviews": reviews}
 
 

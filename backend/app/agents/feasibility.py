@@ -1,14 +1,11 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """FeasibilityAgent — the shipped, working feasibility agent.
 
-Wraps the real `analyse_change` logic so the platform ships feasibility as runnable
+Wraps the real `analyse_change` logic so NPCI ships feasibility as runnable
 code (not a stub). Degrades to a representative MOCK report when no LLM key is
 configured, so a fresh clone produces output without credentials. The 6-area
 output shape is identical to the legacy analyser path (acceptance criterion O5).
 
-A partner customises by editing `run()` here + `prompts/feasibility.md`, or hosts
+A bank customises by editing `run()` here + `prompts/feasibility.md`, or hosts
 their own service and repoints the manifest at a `url:`.
 """
 from __future__ import annotations
@@ -33,9 +30,7 @@ def _llm_key_present(api_key: str | None) -> bool:
         return bool(settings.partner_openai_api_key)
     if provider == "ainxt":
         return bool(settings.partner_ainxt_api_key)
-    if provider == "anthropic":
-        return bool(settings.partner_anthropic_api_key)
-    return False
+    return bool(settings.partner_anthropic_api_key)
 
 
 def _mock_report(reason: str) -> dict:
@@ -49,7 +44,7 @@ def _mock_report(reason: str) -> dict:
             "confidence": "low",
             "findings": [f"Mock feasibility agent: {reason}."],
             "internal_actions": [],
-            "authority_communications": [],
+            "npci_communications": [],
             "referenced_profile_sections": [],
             "referenced_change_docs": [],
         }
@@ -60,7 +55,7 @@ def _mock_report(reason: str) -> dict:
         "overall_posture": "ready_with_conditions",
         "areas": areas,
         "internal_action_summary": [],
-        "authority_communication_summary": [],
+        "npci_communication_summary": [],
         "additional_findings": [f"Mock output returned because: {reason}."],
         "_meta": {
             "mock": True,
@@ -71,7 +66,7 @@ def _mock_report(reason: str) -> dict:
 
 
 class FeasibilityAgent(Agent):
-    """Assess whether the partner can implement an incoming authority change."""
+    """Assess whether the partner can implement an incoming NPCI change."""
 
     def run(self, input: dict) -> dict:
         api_key = input.get("api_key")

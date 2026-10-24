@@ -1,9 +1,6 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Bearer JWT validation middleware for the partner-platform A2A mount.
 
-Part of the A2A security hardening — symmetric to NPCI's
+Slice 3 of the A2A security hardening — symmetric to NPCI's
 `backend/app/a2a_common/sdk_auth_middleware.py`, but lighter:
 
   * No `A2ASession` revocation lookup. Partners receive JWTs minted by
@@ -17,17 +14,14 @@ Part of the A2A security hardening — symmetric to NPCI's
     use auth context. If/when audit enrichment lands on the partner
     side, lift the same `AUTH_CONTEXT` shape from the NPCI module.
 
-Secret source: `partner_settings.authority_jwt_secret` — the same table
+Secret source: `partner_settings.npci_jwt_secret` — the same table
 the partner already uses for runtime config. NPCI ships this value to
 the partner during onboarding (returned once by NPCI's POST
 /admin/partners/.../rotate-jwt-secret endpoint).
 
-FAIL-CLOSED DEFAULT: if no
-`authority_jwt_secret` setting exists, the middleware REJECTS (503) inbound A2A
-calls rather than bypassing auth. The old fail-open back-compat behaviour is
-preserved ONLY behind the explicit, documented
-`PARTNER_ALLOW_UNAUTHENTICATED_A2A=true` escape hatch (default false) — never
-set this in production.
+Back-compat: if no `npci_jwt_secret` setting exists, the middleware
+bypasses auth and logs a one-time WARN. This preserves existing
+partner deployments until they install the new secret.
 
 Public surface:
     PartnerAuthMiddleware  — Starlette BaseHTTPMiddleware subclass
@@ -37,27 +31,16 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-import jwt
-from jwt import PyJWTError
+from jose import JWTError, jwt
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
-from app.core.setting_keys import SettingKey
-
 logger = logging.getLogger(__name__)
 
 ALGORITHM = "HS256"
-
-# The `partner_settings` ROW KEY this middleware reads its verification secret
-# from — a lookup identifier, not a credential. Taken from core/setting_keys.py,
-# whose members derive their values from their own identifiers, so this line is
-# no longer `_SETTING_NAME = "<literal>"`: the shape a "Use Of Hardcoded
-# Password" static-analysis rule reported here in three consecutive scans.
-# `SettingKey.authority_jwt_secret == "authority_jwt_secret"`, so the DB lookup below is
-# byte-for-byte the same query it always was.
-_SETTING_NAME = SettingKey.authority_jwt_secret
+_SETTING_NAME = "npci_jwt_secret"
 
 
 class PartnerAuthMiddleware(BaseHTTPMiddleware):
@@ -85,34 +68,22 @@ class PartnerAuthMiddleware(BaseHTTPMiddleware):
 
         secret = self._load_secret()
         if not secret:
-            from app.core.secret_box import safe_key_label
-
-            from ._security_events import allow_unconfigured_bypass, emit_security_event
-            if allow_unconfigured_bypass():
-                if not self._warned_missing_secret:
-                    # safe_key_label(), not _SETTING_NAME — see the note on
-                    # sensitive-log filtering in _load_secret().
-                    logger.warning(
-                        "PartnerAuthMiddleware: %s is not configured; "
-                        "PARTNER_ALLOW_UNAUTHENTICATED_A2A=true — accepting "
-                        "unsigned calls. THIS MUST NEVER BE SET IN PRODUCTION.",
-                        safe_key_label(_SETTING_NAME),
-                    )
-                    self._warned_missing_secret = True
-                return await call_next(request)
-            emit_security_event(
-                event_name="jwt_secret_unconfigured_reject",
-                severity="critical",
-                boundary="a2a_inbound",
-                decision="rejected",
-            )
-            return _err(
-                503, "jwt_not_configured",
-                "The authority JWT secret is not configured on this partner "
-                "instance. Inbound A2A calls are rejected until an operator "
-                "installs authority_jwt_secret in Settings. This is a "
-                "fail-closed default.",
-            )
+            from app.config import settings
+            if settings.app_env == "production":
+                return _err(401, "a2a_secret_not_configured",
+                            f"`{_SETTING_NAME}` is not installed; refusing unsigned A2A calls.")
+            # Back-compat path (non-production): NPCI hasn't shipped the
+            # per-partner secret yet. Pass through with a one-time warning.
+            if not self._warned_missing_secret:
+                logger.warning(
+                    "PartnerAuthMiddleware: no `%s` configured in "
+                    "partner_settings; accepting unsigned A2A calls. "
+                    "Install the secret NPCI returned at partner-create "
+                    "or rotate-jwt-secret time to enable enforcement.",
+                    _SETTING_NAME,
+                )
+                self._warned_missing_secret = True
+            return await call_next(request)
 
         auth_header = request.headers.get("authorization") or ""
         if not auth_header.lower().startswith("bearer "):
@@ -124,18 +95,8 @@ class PartnerAuthMiddleware(BaseHTTPMiddleware):
 
         try:
             payload = jwt.decode(token, secret, algorithms=[ALGORITHM])
-        except PyJWTError as exc:
-            # The exception TYPE (ExpiredSignatureError, InvalidSignatureError,
-            # DecodeError, ...) is the actionable part for the caller and is a
-            # fixed PyJWT class name, not attacker-influenced content. The
-            # exception's MESSAGE is deliberately dropped: this response crosses
-            # an H3 partner boundary, and `str(exc)` on a JWT error can echo
-            # claim values and key-resolution detail back to an unauthenticated
-            # caller — information exposure through an error message.
-            # Full detail still reaches the operator via logger.debug below.
-            logger.debug("JWT decode failed", exc_info=True)
-            return _err(401, "invalid_token",
-                        f"JWT validation failed ({type(exc).__name__}).")
+        except JWTError as exc:
+            return _err(401, "invalid_token", f"JWT decode failed: {exc}")
 
         if payload.get("type") != "a2a":
             return _err(401, "invalid_token", "JWT type claim is not 'a2a'.")
@@ -147,11 +108,10 @@ class PartnerAuthMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
     def _load_secret(self) -> Optional[str]:
-        """Read `partner_settings.authority_jwt_secret` on each request, decrypting
-        transparently if the stored value is in core.secret_box's enc:v1: form.
+        """Read `partner_settings.npci_jwt_secret` on each request.
 
-        Per-request DB hit is fine — the partner stack runs Postgres
-        in-process-network, the row is hot, and rotation takes effect
+        Per-request DB hit is fine — the partner stack runs SQLite
+        in-process, the row is hot, and rotation takes effect
         immediately without a process restart. If perf becomes an
         issue, add a TTL cache here; today this is the simplest
         correct shape.
@@ -159,7 +119,6 @@ class PartnerAuthMiddleware(BaseHTTPMiddleware):
         # Lazy imports to keep this module importable without dragging
         # the whole partner-app graph (mirrors the NPCI side).
         try:
-            from app.core.secret_box import decrypt, safe_key_label
             from app.database import SessionLocal
             from app.models import PartnerSetting
         except Exception:  # noqa: BLE001
@@ -168,21 +127,7 @@ class PartnerAuthMiddleware(BaseHTTPMiddleware):
         db = SessionLocal()
         try:
             row = db.get(PartnerSetting, _SETTING_NAME)
-            if not row or not row.value:
-                return None
-            try:
-                return decrypt(row.value)
-            except Exception:  # noqa: BLE001 — corrupted/tamper-evident failure
-                # Fixed label, never the key itself — see
-                # secret_box.safe_key_label(). A variable holding the key NAME
-                # is indistinguishable from one holding its VALUE to a taint
-                # engine.
-                logger.critical(
-                    "PartnerAuthMiddleware: failed to decrypt %s — treating as "
-                    "unconfigured (fail-closed). Possible KEK mismatch or "
-                    "tampered value.", safe_key_label(_SETTING_NAME),
-                )
-                return None
+            return row.value if row and row.value else None
         finally:
             db.close()
 

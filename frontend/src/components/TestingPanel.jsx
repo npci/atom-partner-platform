@@ -1,12 +1,8 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // TestingPanel — renders the partner-side test plan produced by the Test agent.
-// The agent AUTHORS the plan + maps coverage to the authority cert cases; the
-// authoritative certification run is delegated to the authority via the existing
+// The agent AUTHORS the plan + maps coverage to the NPCI cert cases; the
+// authoritative certification run is delegated to NPCI via the existing
 // cert-readiness lifecycle (a note points there). Mirrors DesignPanel.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { t } from '../strings'
 import { formatDateTime } from '../lib/datetime';
 import {
   AlertTriangle, ChevronDown, ChevronRight, Download, FlaskConical,
@@ -103,9 +99,7 @@ export default function TestingPanel({ changeId }) {
               Test plan
             </div>
             <div style={{ fontSize: 12, color: T.textSecondary }}>
-              {/* No article: `term.authority` carries its own — see the same
-                  fix in DesignPanel/FeasibilityPanel. */}
-              No test plan yet. Generate partner-side test cases and cert-coverage mapping from {t('term.authority')} documents.
+              No test plan yet. Generate partner-side test cases and cert-coverage mapping from the NPCI documents.
             </div>
           </div>
           <Button
@@ -183,8 +177,8 @@ export default function TestingPanel({ changeId }) {
       {/* Cert coverage — the delegation bridge */}
       <div style={{ marginTop: 14, display: 'flex', flexWrap: 'wrap', gap: 14, alignItems: 'center', fontSize: 12, color: T.textSecondary }}>
         <span>
-          {t('term.authorityCap')} cert coverage:{' '}
-          <strong style={{ color: T.textPrimary }}>{cov.covered ?? 0}/{cov.authority_cases_total ?? 0}</strong>
+          NPCI cert coverage:{' '}
+          <strong style={{ color: T.textPrimary }}>{cov.covered ?? 0}/{cov.npci_cases_total ?? 0}</strong>
           {' '}cases
         </span>
         {caseCount > 0 && <span>· {caseCount} partner test cases across {suites.length} suites</span>}
@@ -206,9 +200,9 @@ export default function TestingPanel({ changeId }) {
         </div>
       )}
 
-      {/* Delegation note — execution runs on the authority's side */}
+      {/* Delegation note — execution runs on NPCI's side */}
       <div style={{ marginTop: 14, padding: '8px 12px', background: T.bgSoft, border: `1px solid ${T.borderSubtle}`, borderRadius: 8, fontSize: 11.5, color: T.textSecondary }}>
-        Execution: the authoritative certification suite is run by {t('term.authority')} after you declare readiness — submit per-TC test data and declare readiness in the <strong>Certification</strong> section.
+        Execution: the authoritative certification suite is run by NPCI after you declare readiness — submit per-TC test data and declare readiness in the <strong>Certification</strong> section.
       </div>
 
       <div style={{ marginTop: 12, fontSize: 11, color: T.textMuted, display: 'flex', gap: 12, flexWrap: 'wrap' }}>

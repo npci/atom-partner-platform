@@ -1,21 +1,15 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // Centralised timestamp rendering for the partner portal.
 //
 // Server timestamps from the partner backend are NAIVE UTC: the DB columns are
 // timezone-naive DateTime, so `datetime.now(timezone.utc).isoformat()` drops the
 // "+00:00" offset. Parsing such a string with `new Date(...)` makes the browser
-// read it as LOCAL time — hours off in any zone away from UTC. `parseIso`
-// appends a 'Z' so the value is parsed as UTC; the authority portal's columns
-// are tz-aware and already carry the offset, so both portals agree.
-//
-// Display defaults to the viewer's locale and timezone (`undefined` lets Intl
-// use the browser's settings). Deployments that want one canonical zone across
-// all viewers set VITE_DISPLAY_TIMEZONE / VITE_DISPLAY_LOCALE at build time.
+// read it as LOCAL time — ~5h30m off in IST. `parseIso` appends a 'Z' so the
+// value is parsed as UTC; the formatters then render it in IST so the partner
+// portal matches the NPCI portal (whose columns are tz-aware and already carry
+// the offset). Display is pinned to Asia/Kolkata so it stays IST regardless of
+// the viewer's machine timezone.
 
-const TZ = import.meta.env.VITE_DISPLAY_TIMEZONE || undefined;
-const LOCALE = import.meta.env.VITE_DISPLAY_LOCALE || undefined;
+const IST = 'Asia/Kolkata';
 
 export function parseIso(s) {
   if (!s) return new Date(NaN);
@@ -25,36 +19,26 @@ export function parseIso(s) {
   return new Date(s);
 }
 
-// Date + time, e.g. "23 Jun 2026, 03:30 pm".
+// Date + time in IST, e.g. "23 Jun 2026, 03:30 pm".
 export function formatDateTime(s, opts = {}) {
   const d = parseIso(s);
   if (isNaN(d)) return '';
-  return d.toLocaleString(LOCALE, {
+  return d.toLocaleString('en-IN', {
     day: 'numeric', month: 'short', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: TZ, ...opts,
+    hour: '2-digit', minute: '2-digit', timeZone: IST, ...opts,
   });
 }
 
-// Date only, e.g. "23 Jun 2026".
+// Date only in IST, e.g. "23 Jun 2026".
 export function formatDate(s, opts = {}) {
   const d = parseIso(s);
   if (isNaN(d)) return '';
-  return d.toLocaleDateString(LOCALE, {
-    day: 'numeric', month: 'short', year: 'numeric', timeZone: TZ, ...opts,
+  return d.toLocaleDateString('en-IN', {
+    day: 'numeric', month: 'short', year: 'numeric', timeZone: IST, ...opts,
   });
 }
 
-// Compact day + time without the year, e.g. "23 Jun, 03:30 pm". Used where
-// horizontal space is tight (timeline stamps, table cells).
-export function formatDayTime(s) {
-  const d = parseIso(s);
-  if (isNaN(d)) return '';
-  return d.toLocaleString(LOCALE, {
-    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: TZ,
-  });
-}
-
-// "just now" / "5m ago" / "2h ago" / "3d ago", then an absolute date.
+// "just now" / "5m ago" / "2h ago" / "3d ago", then an absolute IST date.
 export function formatRelative(s) {
   const d = parseIso(s);
   if (isNaN(d)) return '';

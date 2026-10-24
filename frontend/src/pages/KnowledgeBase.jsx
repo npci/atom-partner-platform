@@ -1,11 +1,7 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // KnowledgeBase — admin page to manage the partner knowledge base (Document
 // RAG). Uploaded docs are chunked + embedded and retrieved by the design/code/
 // test agents as cross-change prior knowledge.
 import { useEffect, useState } from 'react';
-import { t } from '../strings'
 
 import { createKnowledgeDoc, deleteKnowledgeDoc, getKnowledgeDocs } from '../services/api';
 import { formatDateTime } from '../lib/datetime';
@@ -62,7 +58,7 @@ export default function KnowledgeBase() {
     <div style={{ maxWidth: 920, margin: '0 auto', padding: '24px 16px' }}>
       <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>Knowledge Base</h1>
       <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 20 }}>
-        Specs, {t('term.authority')} circulars, past change kits, and internal standards. These are indexed and
+        Specs, NPCI circulars, past change kits, and internal standards. These are indexed and
         retrieved by the Design / Code / Test agents as cross-change prior knowledge.
       </p>
 
@@ -77,7 +73,7 @@ export default function KnowledgeBase() {
         <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 10 }}>Add a document</div>
         <div style={{ display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
           <input
-            placeholder={t('ph.kb.title')}
+            placeholder="Title (e.g. UPI 2.0 Technical Spec)"
             value={form.title}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
             style={inputStyle}

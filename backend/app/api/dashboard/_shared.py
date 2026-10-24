@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Shared helpers for the per-domain dashboard routers.
 
 Holds the bits used by more than one domain module: the cert lifecycle order
@@ -15,12 +12,12 @@ _CERT_STATUS_ORDER = ["received", "deployed", "tested", "ready_for_certification
 
 
 # ── Markdown → native-format converters ───────────────────────────────────────
-# Used by the download endpoints. The authority generates a .docx for every Product Kit
+# Used by the download endpoints. NPCI generates a .docx for every Product Kit
 # doc type and an additional .pptx for product_deck. Some inbound A2A
 # change_communication payloads don't carry the binary bytes (path-resolution
 # bug on the sender, or files not yet generated). In those cases the partner
 # platform always has the markdown content — we synthesise the binary on-the-fly
-# so every doc remains downloadable in the format the authority advertises.
+# so every doc remains downloadable in the format NPCI advertises.
 
 def markdown_to_docx_bytes(content: str, title: str = "") -> bytes:
     """Render markdown content into a .docx. Honours h1-h3, bullet

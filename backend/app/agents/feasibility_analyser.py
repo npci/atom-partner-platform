@@ -1,8 +1,5 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """Feasibility analyser — produces a structured per-area assessment of an
-incoming authority change against the partner's PARTNER.md capability profile.
+incoming NPCI change against the partner's PARTNER.md capability profile.
 
 Single-call LLM with strict JSON output. The output is persisted by the
 caller; this module stays pure (no DB writes) so it can be unit-tested with
@@ -25,7 +22,6 @@ from datetime import datetime, timezone
 from app.agents import _common
 from app.agents.prompts import load_prompt
 from app.config import settings as _settings
-from app.core.domain import prompt_block
 from app.core.llm import call_llm, get_model, get_provider
 
 logger = logging.getLogger(__name__)
@@ -84,9 +80,9 @@ def _truncate_change_docs(documents: list[dict]) -> str:
 def _extract_json(text: str) -> dict | None:
     """Best-effort JSON extraction.
 
-    Handles three common failure modes seen across providers:
+    Handles three common Claude failure modes:
       1. Plain JSON                — `{...}`
-      2. Markdown-fenced JSON      — ```json\n{...}\n```  (models do this
+      2. Markdown-fenced JSON      — ```json\n{...}\n```  (Claude does this
          frequently despite prompt instructions not to)
       3. Prose preamble + JSON     — `Here is the report:\n{...}`
     """
@@ -123,7 +119,7 @@ def _validate_report(obj: dict) -> tuple[bool, str]:
         "overall_posture",
         "areas",
         "internal_action_summary",
-        "authority_communication_summary",
+        "npci_communication_summary",
         "additional_findings",
     )
     for k in required:
@@ -136,11 +132,11 @@ def _validate_report(obj: dict) -> tuple[bool, str]:
             return False, "area entry is not an object"
         if a.get("area") not in AREAS:
             return False, f"unknown area: {a.get('area')!r}"
-    if not isinstance(obj["authority_communication_summary"], list):
-        return False, "authority_communication_summary must be a list"
-    for m in obj["authority_communication_summary"]:
+    if not isinstance(obj["npci_communication_summary"], list):
+        return False, "npci_communication_summary must be a list"
+    for m in obj["npci_communication_summary"]:
         if not isinstance(m, dict) or not m.get("draft_message"):
-            return False, f"invalid authority_communication entry: {m!r}"
+            return False, f"invalid npci_communication entry: {m!r}"
     return True, ""
 
 
@@ -160,7 +156,7 @@ def analyse_change(
     the caller's job — keeps this module pure for tests.
 
     `api_key` mirrors `question_suggester` — when the active provider is
-    anthropic AND a runtime override is supplied (from `partner_settings` /
+    claude AND a runtime override is supplied (from `partner_settings` /
     Settings UI), this call uses that key instead of the env-level one.
     """
     profile_raw, frontmatter = _read_partner_profile()
@@ -180,7 +176,7 @@ def analyse_change(
 
     provider = get_provider()
     runtime_override: str | None = None
-    if provider == "anthropic":
+    if provider == "claude":
         if api_key:
             runtime_override = api_key
         elif not _settings.partner_anthropic_api_key:
@@ -202,7 +198,7 @@ def analyse_change(
         "",
         "---",
         "",
-        f"{prompt_block('authority_cap', 'The authority')} proposed change: {change_title}",
+        f"NPCI proposed change: {change_title}",
     ]
     if change_initial_prompt:
         user_msg_parts.append(f"\nPO prompt: {change_initial_prompt}")
@@ -212,7 +208,7 @@ def analyse_change(
         "",
         "---",
         "",
-        f"{prompt_block('authority_cap', 'The authority')} change documents (baseline — version 1):",
+        "NPCI change documents (baseline — version 1):",
         "",
         doc_block,
     ])
@@ -236,12 +232,12 @@ def analyse_change(
         text = call_llm(
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
-            # Sized to the richest profile, not the smallest. 8000 fit a
-            # ~3700-token report, but a larger partner profile produces a longer
-            # 6-area analysis that truncated at 8000 → invalid JSON → 502. 16000
-            # clears the largest observed output (~8000 tokens) with headroom.
-            # Current models permit considerably more, so bump again in 4K steps
-            # if an even larger profile truncates.
+            # Sized to the richest profile, not the smallest. 8000 fit HDFC's
+            # ~3700-token report but a larger partner profile (e.g. SBI's
+            # research-draft) produces a longer 6-area analysis that truncated
+            # at 8000 → invalid JSON → 502. 16000 clears the observed ~8000-token
+            # SBI output with headroom; Sonnet-4-6 allows up to 64K out, so
+            # bump again in 4K steps if an even larger profile truncates.
             max_tokens=16000,
             api_key=runtime_override,
         )

@@ -1,6 +1,3 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
 // Auth state for the SPA. The session JWT now lives in an httpOnly cookie
 // (set by the backend on login), so it is NOT readable from JavaScript and
 // nothing auth-related is kept in localStorage. The current user is held in

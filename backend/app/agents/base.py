@@ -1,6 +1,3 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
 """`Agent` — the base interface every partner agent implements.
 
 This is the **plug-in seam**. The platform never calls an agent's logic

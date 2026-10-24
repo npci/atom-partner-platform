@@ -1,12 +1,8 @@
-// Copyright 2026 National Payments Corporation of India
-// SPDX-License-Identifier: MIT
-
-// Settings panel for the Code RAG: register the partner's own GitLab
+// Settings panel for the Code RAG (Phase 3.3): register the partner's own GitLab
 // repositories, set a write-only access token, trigger a full re-index, and watch
-// status. The indexed source is what makes the code agent repository-grounded.
-// Backend: app/api/dashboard/code_repo.py.
+// status. The indexed source is what makes the code agent repository-grounded
+// (Phase 3.2). Backend: app/api/dashboard/code_repo.py.
 import { useState } from 'react';
-import { t } from '../strings'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { GitBranch, RefreshCw, Trash2, Plus, KeyRound } from 'lucide-react';
 import { formatDateTime } from '../lib/datetime';
@@ -196,12 +192,12 @@ export default function CodeRepoSettings({ onToast }) {
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <div className="input-group" style={{ margin: 0 }}>
             <label>Label</label>
-            <input className="input-field" placeholder={t('ph.repo.name')} value={form.label}
+            <input className="input-field" placeholder="e.g. UPI Switch" value={form.label}
               onChange={(e) => setForm({ ...form, label: e.target.value })} />
           </div>
           <div className="input-group" style={{ margin: 0 }}>
             <label>GitLab project (group/project)</label>
-            <input className="input-field" placeholder={t('ph.repo.project')} value={form.gitlab_repo}
+            <input className="input-field" placeholder="my-bank/upi-switch" value={form.gitlab_repo}
               onChange={(e) => setForm({ ...form, gitlab_repo: e.target.value })} />
           </div>
           <div className="input-group" style={{ margin: 0 }}>

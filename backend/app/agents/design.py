@@ -1,15 +1,12 @@
-# Copyright 2026 National Payments Corporation of India
-# SPDX-License-Identifier: MIT
-
-"""DesignAgent — produces a partner-side design document for an incoming
-authority change, grounded in PARTNER.md + the change's product-kit documents.
+"""DesignAgent — produces a partner-side design document for an incoming NPCI
+change, grounded in PARTNER.md + the change's product-kit documents.
 
 Mirrors the feasibility agent: a thin `Agent` wrapper (mock degradation when no
 LLM key) over a pure `build_design()` function that does the LLM call + JSON
 parse + shape validation. Shared plumbing (profile read, JSON extraction, key
 check, _meta) lives in `app/agents/_common.py`.
 
-A partner customises by editing `build_design`/`prompts/design.md`, or hosts its own
+A bank customises by editing `build_design`/`prompts/design.md`, or hosts its own
 service and repoints the manifest at a `url:`.
 """
 from __future__ import annotations
@@ -19,7 +16,6 @@ import logging
 from app.agents import _common
 from app.agents.base import Agent
 from app.agents.prompts import load_prompt
-from app.core.domain import prompt_block
 from app.core.llm import call_llm, get_model, get_provider
 
 logger = logging.getLogger(__name__)
@@ -78,11 +74,9 @@ def build_design(
     if not doc_block:
         return None
 
-    # Pack block, not a literal — see the matching note in code.py.
-    _auth = prompt_block("authority_cap", "The authority")
     parts: list[str] = [
         "PARTNER.md", "", profile_raw, "", "---", "",
-        f"{_auth} proposed change: {change_title}",
+        f"NPCI proposed change: {change_title}",
     ]
     if change_initial_prompt:
         parts.append(f"\nPO prompt: {change_initial_prompt}")
@@ -90,7 +84,7 @@ def build_design(
         parts.append(f"\nEnhanced prompt: {change_enhanced_prompt}")
     if feasibility_summary:
         parts += ["", "---", "", f"Feasibility posture (build on this): {feasibility_summary}"]
-    parts += ["", "---", "", f"{_auth} change documents (baseline — version 1):", "", doc_block]
+    parts += ["", "---", "", "NPCI change documents (baseline — version 1):", "", doc_block]
     if revision_summary:
         parts += [
             "", "---", "",
@@ -112,7 +106,7 @@ def build_design(
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_msg}],
             # The full design document (markdown body + structured index) can be
-            # very large; use a configured 64k output budget since 32k
+            # very large; use the model's 64k ceiling (CLAUDE.md §3.6) since 32k
             # truncated on big changes. call_llm raises on truncation.
             max_tokens=64000,
             api_key=_common.runtime_override_key(api_key),
@@ -172,7 +166,7 @@ def _mock_design(reason: str) -> dict:
 
 
 class DesignAgent(Agent):
-    """Produce a partner-side design document for an incoming authority change."""
+    """Produce a partner-side design document for an incoming NPCI change."""
 
     def run(self, input: dict) -> dict:
         api_key = input.get("api_key")
